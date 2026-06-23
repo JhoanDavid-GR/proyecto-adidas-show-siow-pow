@@ -1,0 +1,820 @@
+---
+title: "Pipeline POGIT — Adidas | Script 3: Análisis Descriptivo (Univariado, Bivariado, Multivariado)"
+author: "Tesis de Maestría"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  message   = TRUE,
+  warning   = FALSE,
+  cache     = FALSE,
+  dpi       = 300,
+  fig.width = 9,
+  fig.height = 6,
+  fig.retina = 2
+)
+```
+
+---
+
+> **Sobre este documento**
+> Este Script 3 se inserta entre el Script 2 (preprocesamiento, construcción de V/W/Y)
+> y lo que antes llamábamos "Script 3" y ahora pasa a ser el **Script 4** (estimación de
+> modelos). Su único propósito es el análisis descriptivo de la base final que produjo
+> el Script 2 — **no estima ningún modelo**, no toca V_train/V_test por separado para
+> ajustar nada, solo describe.
+>
+> Estructura:
+> 1. Carga y clasificación de variables (categóricas vs. numéricas; dentro de las
+>    categóricas, multi-selección vs. mutuamente excluyentes).
+> 2. **Resumen general de variables**: inventario completo — cuántas hay en total,
+>    cuántas categóricas, cuántas numéricas, y qué valores posibles tiene cada una.
+> 3. Análisis univariado — categóricas.
+> 4. Análisis univariado — numéricas.
+> 5. Análisis bivariado — categóricas vs. Y.
+> 6. Análisis bivariado — numéricas vs. Y.
+> 7. Análisis multivariado — numéricas (correlación + VIF).
+> 8. Análisis multivariado — categóricas (tablas de contingencia + chi-cuadrado).
+>
+> **Nota metodológica:** para este análisis descriptivo, TRAIN y TEST se combinan en un
+> solo conjunto (`V_all`, `W_all`, `Y_all`), porque describir datos no contamina ningún
+> modelo — el principio de *no data leakage* aplica a parámetros que se **usan para
+> transformar o ajustar**, no a estadísticos que solo se **reportan**. La separación
+> train/test para la modelación (Script 4) no se modifica en absoluto por este script.
+
+---
+
+# Bloque 1 — Carga de paquetes
+
+```{r bloque-1-paquetes}
+packages <- c(
+  "readxl", "dplyr", "tidyr", "tibble", "janitor", "stringr",
+  "ggplot2", "scales", "car"
+)
+invisible(lapply(packages, require, character.only = TRUE))
+```
+
+> **Output esperado:** Ningún output visible si todos los paquetes están instalados.
+
+---
+
+# Bloque 2 — Carga de datos y combinación TRAIN+TEST para descripción
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Lee las 8 hojas de `matrices_data_adidas.xlsx` (igual que el Script 4) y combina TRAIN
+y TEST en `V_all`, `W_all`, `Y_all` — conservando una columna `conjunto` que indica el
+origen de cada fila, por si quieres comparar después si TRAIN y TEST son representativos
+entre sí (un chequeo de balance del split, no de modelación).
+
+```{r bloque-2-carga-datos}
+# Ruta absoluta — evita depender de d\u00f3nde est\u00e9 guardado este .Rmd o desde
+# d\u00f3nde lo knittees (knitr fija el directorio de trabajo a la carpeta del .Rmd,
+# no a la ra\u00edz del proyecto, lo cual rompe rutas relativas si el archivo no est\u00e1
+# guardado exactamente en la carpeta del proyecto).
+ruta_excel <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/data/matrices/matrices_data_adidas.xlsx"
+
+ids_train <- readxl::read_excel(ruta_excel, sheet = "ids_train")$response_id
+ids_test  <- readxl::read_excel(ruta_excel, sheet = "ids_test")$response_id
+
+V_train <- readxl::read_excel(ruta_excel, sheet = "V_train") |> as.data.frame() |> janitor::clean_names()
+V_test  <- readxl::read_excel(ruta_excel, sheet = "V_test")  |> as.data.frame() |> janitor::clean_names()
+W_train <- readxl::read_excel(ruta_excel, sheet = "W_train") |> as.data.frame() |> janitor::clean_names()
+W_test  <- readxl::read_excel(ruta_excel, sheet = "W_test")  |> as.data.frame() |> janitor::clean_names()
+
+Y_train <- readxl::read_excel(ruta_excel, sheet = "Y_train")[[1]]
+Y_test  <- readxl::read_excel(ruta_excel, sheet = "Y_test")[[1]]
+
+stopifnot(identical(names(V_train), names(V_test)))
+stopifnot(identical(names(W_train), names(W_test)))
+
+# Quitamos "intercept" — es un artefacto de modelación (columna de unos), no una
+# variable que describir.
+V_train <- dplyr::select(V_train, -intercept)
+V_test  <- dplyr::select(V_test,  -intercept)
+W_train <- dplyr::select(W_train, -intercept)
+W_test  <- dplyr::select(W_test,  -intercept)
+
+V_all <- dplyr::bind_rows(V_train, V_test)
+W_all <- dplyr::bind_rows(W_train, W_test)
+Y_all <- c(Y_train, Y_test)
+conjunto <- c(rep("train", nrow(V_train)), rep("test", nrow(V_test)))
+
+stopifnot(nrow(V_all) == nrow(W_all), nrow(V_all) == length(Y_all))
+message("Universo combinado para descripci\u00f3n: ", nrow(V_all), " clientes")
+message("V_all: ", ncol(V_all), " variables | W_all: ", ncol(W_all), " variables")
+```
+
+> **Output esperado:** Confirmación del tamaño combinado y número de variables en V y W
+> (sin contar `intercept`, que ya se eliminó).
+
+---
+
+# Bloque 3 — Clasificación de variables: categóricas vs. numéricas
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Detecta automáticamente, para cada columna de V y W, si es **binaria** (solo toma
+valores 0/1 — origen categórico) o **numérica continua/conteo**. Dentro de las
+binarias, además detecta si un grupo de columnas (identificadas por su prefijo común,
+ej. `q_demos_age_`) es **mutuamente excluyente** (a lo sumo un "1" por fila — viene de
+una sola pregunta categórica con una sola respuesta posible) o **multi-selección**
+(puede haber más de un "1" por fila — viene de una pregunta de selección múltiple).
+
+Esta detección es automática y verificada, no asumida — por eso no se hardcodea
+"race y life son multi-selección"; se comprueba con `rowSums()` que efectivamente
+nunca tienen más de un "1" por fila en los grupos mutuamente excluyentes.
+
+```{r bloque-3-clasificacion}
+es_binaria <- function(x) all(x %in% c(0, 1))
+
+vars_v <- names(V_all)
+es_bin_v <- vapply(V_all[vars_v], es_binaria, logical(1))
+
+cat_v <- vars_v[es_bin_v]      # categóricas (dummies) de V
+num_v <- vars_v[!es_bin_v]     # numéricas de V (debería ser solo n_states)
+
+vars_w <- names(W_all)
+es_bin_w <- vapply(W_all[vars_w], es_binaria, logical(1))
+cat_w <- vars_w[es_bin_w]      # si hubiera alguna binaria en W (no se espera ninguna)
+num_w <- vars_w[!es_bin_w]     # numéricas de W (RFM + features 12m + ratios)
+
+message("V — categ\u00f3ricas (dummies): ", length(cat_v), " | num\u00e9ricas: ", length(num_v))
+message("V num\u00e9ricas: ", paste(num_v, collapse = ", "))
+message("W — categ\u00f3ricas: ", length(cat_w), " | num\u00e9ricas: ", length(num_w))
+
+# Agrupar las dummies de V por prefijo (antes del último bloque de nombre)
+prefijos_v <- c("race_", "life_", "q_demos_age_", "q_demos_income_", "q_amazon_use_howmany_")
+
+clasificacion_grupos <- lapply(prefijos_v, function(p) {
+  cols <- grep(paste0("^", p), cat_v, value = TRUE)
+  if (length(cols) == 0) return(NULL)
+  mat <- as.matrix(V_all[, cols, drop = FALSE])
+  mutuamente_excluyente <- all(rowSums(mat) <= 1)
+  list(prefijo = p, columnas = cols, tipo = if (mutuamente_excluyente) "mutuamente_excluyente" else "multi_seleccion")
+})
+clasificacion_grupos <- clasificacion_grupos[!sapply(clasificacion_grupos, is.null)]
+
+for (g in clasificacion_grupos) {
+  message(g$prefijo, " -> ", g$tipo, " (", length(g$columnas), " columnas)")
+}
+```
+
+> **Output esperado:** Para V, deberías ver `n_states` como la única numérica. Para
+> cada grupo de dummies (`race_`, `life_`, `q_demos_age_`, `q_demos_income_`,
+> `q_amazon_use_howmany_`), un mensaje indicando si se detectó como "multi_seleccion"
+> (esperable para race y life) o "mutuamente_excluyente" (esperable para edad, ingreso
+> y howmany). Si alguno sale distinto a lo esperado, revisa cómo se construyó esa
+> variable en el Script 2.
+
+---
+
+# Bloque 4 — Reconstrucción de categóricas mutuamente excluyentes
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Para los grupos mutuamente excluyentes (edad, ingreso, howmany), reconstruye la
+categoría original por fila: si alguna dummy del grupo es 1, esa es la categoría; si
+todas son 0, la fila pertenece a la **categoría de referencia** que `dummy_cols()`
+eliminó en el Script 2.
+
+> ⚠️ **Limitación honesta:** para `q_demos_age` y `q_amazon_use_howmany`, el Script 2
+> fijó explícitamente la categoría de referencia (`"18 - 24 years"` y `"1 (just me!)"`),
+> así que la podemos etiquetar correctamente. Para `q_demos_income`, el Script 2 **no**
+> fijó una referencia explícita — `fastDummies` eligió una por orden alfabético sin que
+> quedara documentado cuál. Por honestidad, esa categoría se etiqueta genéricamente como
+> `"Categoría de referencia (sin nombre)"` en vez de inventar cuál tramo de ingreso es.
+> Si necesitas el nombre exacto, hay que volver a `data_dum` en el Script 2, antes de
+> que `dummy_cols(remove_selected_columns = TRUE)` la elimine.
+
+```{r bloque-4-reconstruccion}
+reconstruir_categorica <- function(df, prefijo, etiqueta_referencia) {
+  cols <- grep(paste0("^", prefijo), names(df), value = TRUE)
+  mat  <- as.matrix(df[, cols, drop = FALSE])
+  stopifnot(all(rowSums(mat) <= 1))  # debe ser mutuamente excluyente
+
+  categoria <- apply(mat, 1, function(fila) {
+    idx <- which(fila == 1)
+    if (length(idx) == 0) etiqueta_referencia else gsub(paste0("^", prefijo), "", cols[idx])
+  })
+  factor(categoria)
+}
+
+edad_cat     <- reconstruir_categorica(V_all, "q_demos_age_", "18_24_years (referencia)")
+howmany_cat  <- reconstruir_categorica(V_all, "q_amazon_use_howmany_", "1_just_me (referencia)")
+ingreso_cat  <- reconstruir_categorica(V_all, "q_demos_income_", "Categor\u00eda de referencia (sin nombre)")
+
+message("Edad reconstruida: ", paste(levels(edad_cat), collapse = " | "))
+message("Howmany reconstruido: ", paste(levels(howmany_cat), collapse = " | "))
+message("Ingreso reconstruido: ", paste(levels(ingreso_cat), collapse = " | "))
+```
+
+> **Output esperado:** Tres mensajes listando los niveles reconstruidos de cada
+> variable. Para edad y howmany deberías reconocer las categorías reales del survey;
+> para ingreso, todas menos la de referencia.
+
+---
+
+# Bloque 5 — Resumen general de variables
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Antes de entrar al detalle univariado/bivariado/multivariado, este bloque construye
+un **inventario completo**: cuántas variables hay en total, cuántas son categóricas y
+cuántas numéricas, y qué valores puede tomar cada una. Todo se calcula directamente de
+los objetos ya construidos en los Bloques 3 y 4 (`cat_v`, `num_v`, `cat_w`, `num_w`,
+`edad_cat`, `ingreso_cat`, `howmany_cat`) — nada se escribe a mano, así que si la base
+cambia (más datos, otra corrida del Script 2), este resumen se actualiza solo.
+
+```{r bloque-5-resumen-general}
+total_vars <- ncol(V_all) + ncol(W_all)
+total_cat  <- length(cat_v) + length(cat_w)
+total_num  <- length(num_v) + length(num_w)
+
+cat("=== INVENTARIO GENERAL (V + W, sin contar Y ni Intercept) ===\n")
+cat("Total de variables: ", total_vars, "\n")
+cat("  - Categ\u00f3ricas (dummies 0/1): ", total_cat, "\n")
+cat("  - Num\u00e9ricas (continuas, estandarizadas): ", total_num, "\n\n")
+
+resumen_grupos <- tibble::tibble(
+  grupo = c("Raza", "Eventos de vida 2021", "Grupo de edad", "Tramo de ingreso",
+            "Personas que comparten cuenta Amazon", "n_states (V)",
+            "Variables de comportamiento (W)"),
+  tipo = c(rep("Categ\u00f3rica", 5), rep("Num\u00e9rica", 2)),
+  naturaleza = c("Multi-selecci\u00f3n", "Multi-selecci\u00f3n",
+                 "Mutuamente excluyente", "Mutuamente excluyente", "Mutuamente excluyente",
+                 "Continua estandarizada", "Continua estandarizada"),
+  n_columnas_dummy = c(
+    length(grep("^race_", cat_v)),
+    length(grep("^life_", cat_v)),
+    length(grep("^q_demos_age_", cat_v)),
+    length(grep("^q_demos_income_", cat_v)),
+    length(grep("^q_amazon_use_howmany_", cat_v)),
+    1L,
+    length(num_w)
+  ),
+  n_valores_posibles = c(
+    length(grep("^race_", cat_v)),
+    length(grep("^life_", cat_v)),
+    length(levels(edad_cat)),
+    length(levels(ingreso_cat)),
+    length(levels(howmany_cat)),
+    NA, NA
+  )
+)
+
+print(resumen_grupos, n = Inf)
+
+cat("\n--- Valores posibles de cada variable categ\u00f3rica ---\n\n")
+
+valores_posibles <- dplyr::bind_rows(
+  tibble::tibble(grupo = "Raza", valor = gsub("^race_", "", grep("^race_", cat_v, value = TRUE))),
+  tibble::tibble(grupo = "Eventos de vida 2021", valor = gsub("^life_", "", grep("^life_", cat_v, value = TRUE))),
+  tibble::tibble(grupo = "Grupo de edad", valor = levels(edad_cat)),
+  tibble::tibble(grupo = "Tramo de ingreso", valor = levels(ingreso_cat)),
+  tibble::tibble(grupo = "Personas que comparten cuenta", valor = levels(howmany_cat))
+)
+print(valores_posibles, n = Inf)
+
+cat("\n--- Rango observado de las variables num\u00e9ricas (ya estandarizadas, Z-score) ---\n\n")
+
+rango_numericas <- tibble::tibble(
+  variable = c("n_states", num_w),
+  minimo = c(min(V_all$n_states), sapply(num_w, function(v) min(W_all[[v]]))),
+  maximo = c(max(V_all$n_states), sapply(num_w, function(v) max(W_all[[v]])))
+)
+print(rango_numericas, n = Inf)
+```
+
+> **Output esperado:** Una tabla resumen por grupo de variable (tipo, naturaleza,
+> número de columnas dummy, número de valores posibles), seguida de una tabla larga
+> con cada valor categórico posible por grupo, y una tabla con el rango observado de
+> las variables numéricas. Como ya están estandarizadas (Z-score con parámetros de
+> TRAIN), deberían rondar aproximadamente entre -2 y +4 — valores muy fuera de ese
+> rango podrían indicar un outlier que sobrevivió a la winsorización del Script 2.
+
+---
+
+# Bloque 6 — Análisis univariado: categóricas
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Para las variables **multi-selección** (race, life), reporta la prevalencia de cada
+bandera por separado (no tiene sentido una sola distribución, porque un cliente puede
+tener varias). Para las **mutuamente excluyentes** (edad, ingreso, howmany), reporta la
+distribución completa de categorías, incluyendo la de referencia reconstruida.
+
+```{r bloque-6-univariado-categoricas, fig.width=9, fig.height=5}
+# --- Multi-selección: prevalencia de cada bandera ---
+resumen_multiselect <- function(df, prefijo) {
+  cols <- grep(paste0("^", prefijo), names(df), value = TRUE)
+  tibble::tibble(
+    variable = gsub(paste0("^", prefijo), "", cols),
+    n_si     = colSums(df[, cols, drop = FALSE]),
+    pct_si   = round(100 * colSums(df[, cols, drop = FALSE]) / nrow(df), 1)
+  ) %>% dplyr::arrange(dplyr::desc(pct_si))
+}
+
+resumen_race <- resumen_multiselect(V_all, "race_")
+resumen_life <- resumen_multiselect(V_all, "life_")
+
+cat("=== Prevalencia de raza (multi-selecci\u00f3n) ===\n"); print(resumen_race)
+cat("\n=== Prevalencia de eventos de vida (multi-selecci\u00f3n) ===\n"); print(resumen_life)
+
+# --- Tema compartido para todos los gráficos de este script: fuente serif/Times,
+# tamaño base consistente con el resto del proyecto (Scripts 1 y 2) ---
+tema_descriptivo <- ggplot2::theme_minimal(base_size = 16) +
+  ggplot2::theme(text = ggplot2::element_text(family = "serif"))
+
+ggplot2::ggplot(resumen_race, ggplot2::aes(x = reorder(variable, pct_si), y = pct_si)) +
+  ggplot2::geom_col(fill = "grey70") +
+  ggplot2::coord_flip() +
+  ggplot2::labs(title = "Prevalencia de raza (universo Adidas, TRAIN+TEST)",
+                x = NULL, y = "% que declara esa raza") +
+  tema_descriptivo
+
+ggplot2::ggplot(resumen_life, ggplot2::aes(x = reorder(variable, pct_si), y = pct_si)) +
+  ggplot2::geom_col(fill = "grey70") +
+  ggplot2::coord_flip() +
+  ggplot2::labs(title = "Prevalencia de eventos de vida (universo Adidas, TRAIN+TEST)",
+                x = NULL, y = "% que declara ese evento") +
+  tema_descriptivo
+
+# --- Mutuamente excluyentes: distribución completa ---
+graficar_categorica <- function(cat_vec, titulo) {
+  df_tab <- as.data.frame(table(cat_vec))
+  names(df_tab) <- c("categoria", "n")
+  df_tab$pct <- round(100 * df_tab$n / sum(df_tab$n), 1)
+
+  print(df_tab)
+
+  ggplot2::ggplot(df_tab, ggplot2::aes(x = reorder(categoria, n), y = n)) +
+    ggplot2::geom_col(fill = "grey70") +
+    ggplot2::geom_text(ggplot2::aes(label = paste0(pct, "%")), hjust = -0.1, size = 3.2, family = "serif") +
+    ggplot2::coord_flip() +
+    ggplot2::labs(title = titulo, x = NULL, y = "N\u00famero de clientes") +
+    tema_descriptivo
+}
+
+print(graficar_categorica(edad_cat,    "Distribuci\u00f3n por grupo de edad (reconstruida)"))
+print(graficar_categorica(howmany_cat, "Personas que comparten la cuenta (reconstruida)"))
+print(graficar_categorica(ingreso_cat, "Distribuci\u00f3n por tramo de ingreso (reconstruida)"))
+```
+
+> **Output esperado:** Dos tablas + dos gráficos para race/life (prevalencia de cada
+> bandera, no suman 100% porque son multi-selección), y tres tablas + tres gráficos
+> para edad/howmany/ingreso (distribución completa, sí suma 100% porque son categorías
+> mutuamente excluyentes).
+
+---
+
+# Bloque 7 — Análisis univariado: numéricas
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Calcula estadísticos descriptivos (media, mediana, desviación estándar, mínimo, máximo,
+asimetría) para todas las variables numéricas de W (RFM + features de 12 meses +
+ratios) y para `n_states` de V. La asimetría es relevante aquí porque gran parte de
+estas variables (gasto, frecuencia) son fuertemente asimétricas — es la misma razón por
+la que el Script 2 aplicó winsorización antes de modelar.
+
+```{r bloque-7-univariado-numericas}
+asimetria <- function(x) {
+  n <- length(x); m <- mean(x); s <- sd(x)
+  if (s == 0) return(NA_real_)
+  (sum((x - m)^3) / n) / s^3
+}
+
+resumen_numericas <- function(df, vars) {
+  tibble::tibble(
+    variable = vars,
+    media    = sapply(vars, function(v) mean(df[[v]], na.rm = TRUE)),
+    mediana  = sapply(vars, function(v) median(df[[v]], na.rm = TRUE)),
+    sd       = sapply(vars, function(v) sd(df[[v]], na.rm = TRUE)),
+    minimo   = sapply(vars, function(v) min(df[[v]], na.rm = TRUE)),
+    maximo   = sapply(vars, function(v) max(df[[v]], na.rm = TRUE)),
+    asimetria = sapply(vars, function(v) asimetria(df[[v]]))
+  )
+}
+
+tabla_num_w <- resumen_numericas(W_all, num_w)
+tabla_num_v <- resumen_numericas(V_all, num_v)
+
+cat("=== Estad\u00edsticos descriptivos — W (num\u00e9ricas) ===\n")
+print(tabla_num_w, n = Inf)
+cat("\n=== Estad\u00edsticos descriptivos — V (num\u00e9ricas: n_states) ===\n")
+print(tabla_num_v)
+
+# Histogramas de las variables RFM (las 3 más centrales del modelo)
+for (v in c("recency_days_adidas", "frequency_adidas", "monetary_adidas")) {
+  if (v %in% names(W_all)) {
+    p <- ggplot2::ggplot(W_all, ggplot2::aes(x = .data[[v]])) +
+      ggplot2::geom_histogram(bins = 30, fill = "grey70", color = "grey40") +
+      ggplot2::labs(title = paste("Distribuci\u00f3n de", v), x = v, y = "Frecuencia") +
+      tema_descriptivo
+    print(p)
+  }
+}
+```
+
+> **Output esperado:** Dos tablas (W y V) con 6 estadísticos por variable, más 3
+> histogramas (recency, frequency, monetary). Espera asimetrías altas y positivas en
+> casi todas las variables de gasto/conteo — es lo esperado dado el perfil de la
+> categoría, y es la justificación misma de por qué el Script 2 winsorizó antes de
+> modelar.
+
+---
+
+# Bloque 7.5 — Análisis univariado: Variable respuesta
+
+# Variable respuesta
+
+```{r bloque-7.5 -univariado-respuestas}
+#===========================================================
+# ANALISIS DESCRIPTIVO - VARIABLE RESPUESTA Y
+#===========================================================
+
+library(ggplot2)
+library(dplyr)
+library(e1071)
+library(gridExtra)
+
+cat("\n")
+cat("============================================================\n")
+cat("VARIABLE: Y (Gasto Adidas discretizado)\n")
+cat("============================================================\n")
+
+cat("Total registros :", length(Y_train), "\n")
+cat("Nulos           :", sum(is.na(Y_train)), "\n")
+cat("Unicos          :", length(unique(Y_train)), "\n")
+
+cat("Media           :", round(mean(Y_train, na.rm = TRUE), 3), "\n")
+cat("Mediana         :", median(Y_train, na.rm = TRUE), "\n")
+
+moda_y <- names(sort(table(Y_train), decreasing = TRUE))[1]
+cat("Moda            :", moda_y, "\n")
+
+cat("Desv. estándar  :", round(sd(Y_train, na.rm = TRUE), 3), "\n")
+
+cat("Mínimo          :", min(Y_train, na.rm = TRUE), "\n")
+cat("Máximo          :", max(Y_train, na.rm = TRUE), "\n")
+
+cat("Rango           :",
+    max(Y_train, na.rm = TRUE) -
+    min(Y_train, na.rm = TRUE),
+    "\n")
+
+cat("Percentil 25    :",
+    quantile(Y_train, 0.25, na.rm = TRUE),
+    "\n")
+
+cat("Percentil 75    :",
+    quantile(Y_train, 0.75, na.rm = TRUE),
+    "\n")
+
+cat("IQR             :",
+    IQR(Y_train, na.rm = TRUE),
+    "\n")
+
+cat("Asimetría       :",
+    round(skewness(Y_train, na.rm = TRUE), 3),
+    "\n")
+
+cat("Curtosis        :",
+    round(kurtosis(Y_train, na.rm = TRUE), 3),
+    "\n")
+
+cat("% de ceros      :",
+    round(mean(Y_train == 0, na.rm = TRUE)*100,2),
+    "%\n")
+
+cat("Varianza        :",
+    round(var(Y_train, na.rm = TRUE), 3),
+    "\n")
+
+cat("Var/Media       :",
+    round(
+      var(Y_train, na.rm = TRUE) /
+      mean(Y_train, na.rm = TRUE),
+      3
+    ),
+    "\n")
+
+#===========================================================
+# TABLA DE FRECUENCIAS
+#===========================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("DISTRIBUCION DE Y\n")
+cat("============================================================\n")
+
+tabla_y <- as.data.frame(table(Y_train))
+names(tabla_y) <- c("Valor","Frecuencia")
+
+tabla_y$Porcentaje <-
+  round(
+    tabla_y$Frecuencia /
+    sum(tabla_y$Frecuencia) * 100,
+    2
+  )
+
+print(tabla_y)
+
+#===========================================================
+# GRAFICO 1 - HISTOGRAMA
+#===========================================================
+
+g1 <- ggplot(
+  data.frame(Y = Y_train),
+  aes(x = Y)
+) +
+  geom_bar() +
+  labs(
+    title = "Distribución de Y",
+    x = "Y (Gasto Adidas discretizado)",
+    y = "Frecuencia"
+  ) +
+  theme_minimal()
+
+#===========================================================
+# GRAFICO 2 - BOXPLOT
+#===========================================================
+
+g2 <- ggplot(
+  data.frame(Y = Y_train),
+  aes(y = Y)
+) +
+  geom_boxplot() +
+  labs(
+    title = "Boxplot de Y",
+    y = "Y"
+  ) +
+  theme_minimal()
+
+#===========================================================
+# GRAFICO 3 - PORCENTAJES
+#===========================================================
+
+g3 <- ggplot(
+  tabla_y,
+  aes(
+    x = factor(Valor),
+    y = Porcentaje
+  )
+) +
+  geom_col() +
+  labs(
+    title = "Porcentaje por categoría de Y",
+    x = "Valor de Y",
+    y = "Porcentaje"
+  ) +
+  theme_minimal()
+
+#===========================================================
+# MOSTRAR GRAFICOS
+#===========================================================
+
+grid.arrange(
+  g1,
+  g2,
+  g3,
+  ncol = 2
+)
+
+#===========================================================
+# INTERPRETACION AUTOMATICA
+#===========================================================
+
+cat("\n")
+cat("============================================================\n")
+cat("INTERPRETACION\n")
+cat("============================================================\n")
+
+if(mean(Y_train == 0) > 0.50){
+  cat(
+    "- Se observa una elevada proporcion de ceros.\n"
+  )
+}
+
+if(
+  var(Y_train, na.rm = TRUE) >
+  mean(Y_train, na.rm = TRUE)
+){
+  cat(
+    "- Existe evidencia de sobredispersion (Varianza > Media).\n"
+  )
+}
+
+if(
+  abs(skewness(Y_train, na.rm = TRUE)) > 1
+){
+  cat(
+    "- La distribucion presenta alta asimetria.\n"
+  )
+}
+
+cat(
+"- La variable Y corresponde al gasto Adidas discretizado utilizado por el modelo POGIT.\n"
+)
+  
+```
+  
+# Bloque 8 — Análisis bivariado: categóricas vs. Y
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Para cada variable categórica, compara `Y` entre grupos: para multi-selección, la media
+de Y cuando la bandera es 1 vs. cuando es 0; para mutuamente excluyentes, la media de Y
+por categoría. Esto responde preguntas como "¿los clientes que declararon embarazo
+gastan distinto en Adidas en T2?" — la misma pregunta que el paper original reportó para
+Apple (efecto negativo de `life_became_pregnant` sobre la intensidad de consumo).
+
+```{r bloque-8-bivariado-categoricas}
+media_y_por_flag <- function(flag_vec, y_vec, nombre) {
+  tibble::tibble(
+    variable  = nombre,
+    media_y_si = mean(y_vec[flag_vec == 1], na.rm = TRUE),
+    media_y_no = mean(y_vec[flag_vec == 0], na.rm = TRUE),
+    n_si = sum(flag_vec == 1)
+  )
+}
+
+bivariado_race <- dplyr::bind_rows(lapply(grep("^race_", names(V_all), value = TRUE),
+  function(v) media_y_por_flag(V_all[[v]], Y_all, v)))
+bivariado_life <- dplyr::bind_rows(lapply(grep("^life_", names(V_all), value = TRUE),
+  function(v) media_y_por_flag(V_all[[v]], Y_all, v)))
+
+cat("=== Y promedio seg\u00fan raza (s\u00ed vs. no) ===\n"); print(bivariado_race)
+cat("\n=== Y promedio seg\u00fan evento de vida (s\u00ed vs. no) ===\n"); print(bivariado_life)
+
+# Mutuamente excluyentes: Y promedio por categoría completa
+df_biv <- tibble::tibble(Y = Y_all, edad = edad_cat, howmany = howmany_cat, ingreso = ingreso_cat)
+
+cat("\n=== Y promedio por grupo de edad ===\n")
+print(df_biv %>% dplyr::group_by(edad) %>% dplyr::summarise(media_y = mean(Y), n = dplyr::n()))
+
+cat("\n=== Y promedio por tramo de ingreso ===\n")
+print(df_biv %>% dplyr::group_by(ingreso) %>% dplyr::summarise(media_y = mean(Y), n = dplyr::n()))
+
+ggplot2::ggplot(df_biv, ggplot2::aes(x = edad, y = Y)) +
+  ggplot2::geom_boxplot(fill = "grey80") +
+  ggplot2::labs(title = "Y (gasto Adidas T2) por grupo de edad", x = NULL, y = "Y") +
+  tema_descriptivo +
+  ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 30, hjust = 1))
+```
+
+> **Output esperado:** Tablas comparando Y promedio entre grupos para cada variable
+> categórica, más un boxplot de Y por edad. Diferencias grandes entre `media_y_si` y
+> `media_y_no` (para race/life) o entre categorías de edad/ingreso sugieren que esa
+> variable tiene poder explicativo real sobre el SoW/SioW — información directamente
+> relevante para justificar (o cuestionar) su inclusión en V.
+
+---
+
+# Bloque 9 — Análisis bivariado: numéricas vs. Y
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Calcula la correlación de Spearman (apropiada para variables asimétricas y para una
+respuesta con alta inflación de ceros) entre cada variable numérica de W y la variable
+de respuesta Y. Esto es exactamente el tipo de análisis que faltaba estar documentado
+explícitamente — ya existía implícitamente en la selección de variables del Script 2,
+pero nunca se reportó como tabla.
+
+```{r bloque-9-bivariado-numericas}
+correlaciones_y <- tibble::tibble(
+  variable = num_w,
+  spearman = sapply(num_w, function(v) cor(W_all[[v]], Y_all, method = "spearman", use = "complete.obs"))
+) %>% dplyr::arrange(dplyr::desc(abs(spearman)))
+
+print(correlaciones_y, n = Inf)
+
+top5 <- head(correlaciones_y$variable, 5)
+for (v in top5) {
+  p <- ggplot2::ggplot(data.frame(x = W_all[[v]], y = Y_all), ggplot2::aes(x = x, y = y)) +
+    ggplot2::geom_jitter(alpha = 0.3, width = 0, height = 0.1) +
+    ggplot2::labs(title = paste("Y vs.", v), x = v, y = "Y") +
+    tema_descriptivo
+  print(p)
+}
+```
+
+> **Output esperado:** Una tabla con todas las variables de W ordenadas por correlación
+> de Spearman absoluta con Y, más 5 scatter plots de las variables más correlacionadas.
+> Las variables de monto/frecuencia relacionadas con Adidas (recency, frequency,
+> monetary) deberían estar entre las más correlacionadas — si no lo están, es una señal
+> de alerta sobre la calidad de esas features.
+
+---
+
+# Bloque 10 — Análisis multivariado: numéricas (correlación + VIF)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Presenta como análisis explícito lo que en el Script 2 (Bloque 26-27) era un paso
+silencioso de limpieza: la matriz de correlación completa entre las variables numéricas
+de W, visualizada como mapa de calor, más el VIF (Variance Inflation Factor) — la misma
+métrica que se agregó en el Script 4 (antes Script 3) de modelación, pero aquí
+presentada como diagnóstico exploratorio independiente, no como parte del flujo de
+ajuste de un modelo.
+
+```{r bloque-10-multivariado-numericas, fig.width=10, fig.height=9}
+mat_cor <- cor(W_all[, num_w], method = "spearman", use = "pairwise.complete.obs")
+
+df_cor <- as.data.frame(as.table(mat_cor))
+names(df_cor) <- c("var1", "var2", "correlacion")
+
+ggplot2::ggplot(df_cor, ggplot2::aes(x = var1, y = var2, fill = correlacion)) +
+  ggplot2::geom_tile() +
+  ggplot2::scale_fill_gradient2(low = "steelblue", mid = "white", high = "firebrick",
+                                 midpoint = 0, limits = c(-1, 1)) +
+  ggplot2::labs(title = "Matriz de correlaci\u00f3n de Spearman \u2014 variables num\u00e9ricas de W",
+                x = NULL, y = NULL) +
+  tema_descriptivo +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(angle = 90, hjust = 1, vjust = 0.5, size = 9, family = "serif"),
+    axis.text.y = ggplot2::element_text(size = 9, family = "serif")
+  )
+
+# VIF: se necesita un modelo ajustado; usamos un lm() solo con fines de diagnóstico
+# (el VIF no depende de la familia/distribución de Y, solo de la matriz de predictoras)
+form_vif <- as.formula(paste("Y ~", paste(num_w, collapse = " + ")))
+df_vif <- W_all[, num_w]; df_vif$Y <- Y_all
+modelo_vif <- lm(form_vif, data = df_vif)
+
+vif_vals <- car::vif(modelo_vif)
+vif_ordenado <- sort(vif_vals, decreasing = TRUE)
+
+cat("=== VIF de las variables num\u00e9ricas de W (ordenado, mayor a menor) ===\n")
+print(round(vif_ordenado, 2))
+
+n_vif_alto <- sum(vif_ordenado > 5)
+message("Variables con VIF > 5: ", n_vif_alto, " de ", length(vif_ordenado))
+```
+
+> **Output esperado:** Un mapa de calor de correlaciones (rojo = correlación positiva
+> fuerte, azul = negativa fuerte, blanco = sin correlación), seguido de la tabla de VIF
+> ordenada. Es esperable ver VIF altos entre las variables `top1`/`top3_avg`/`top6_avg`
+> de un mismo tipo (dólar o productos) — están construidas a partir de la misma base de
+> datos mensual, así que cierta redundancia es inherente al diseño, no un error.
+
+---
+
+# Bloque 11 — Análisis multivariado: categóricas (tablas de contingencia)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Examina la relación conjunta entre pares de variables categóricas mutuamente
+excluyentes (edad × ingreso, edad × howmany) mediante tablas de contingencia cruzada y
+la prueba de independencia de Chi-cuadrado. Esto permite detectar si, por ejemplo, los
+tramos de edad y de ingreso están fuertemente asociados entre sí en esta muestra — lo
+cual, de ser así, sería una forma adicional (no numérica) de colinealidad en V que el
+VIF del Bloque 10 no captura porque ese VIF solo cubrió las variables de W.
+
+```{r bloque-11-multivariado-categoricas}
+tabla_edad_ingreso <- table(edad_cat, ingreso_cat)
+cat("=== Tabla de contingencia: Edad x Ingreso ===\n")
+print(tabla_edad_ingreso)
+
+chi_edad_ingreso <- chisq.test(tabla_edad_ingreso, simulate.p.value = TRUE, B = 2000)
+cat("\nChi-cuadrado (Edad x Ingreso): estad\u00edstico =", round(chi_edad_ingreso$statistic, 2),
+    "| p-valor (simulado) =", round(chi_edad_ingreso$p.value, 4), "\n")
+
+tabla_edad_howmany <- table(edad_cat, howmany_cat)
+cat("\n=== Tabla de contingencia: Edad x N\u00famero de personas que comparten cuenta ===\n")
+print(tabla_edad_howmany)
+
+chi_edad_howmany <- chisq.test(tabla_edad_howmany, simulate.p.value = TRUE, B = 2000)
+cat("\nChi-cuadrado (Edad x Howmany): estad\u00edstico =", round(chi_edad_howmany$statistic, 2),
+    "| p-valor (simulado) =", round(chi_edad_howmany$p.value, 4), "\n")
+```
+
+> **Output esperado:** Dos tablas de contingencia y dos pruebas de Chi-cuadrado. Un
+> p-valor pequeño (< 0.05) indica asociación estadísticamente significativa entre esas
+> dos variables categóricas — útil para tu narrativa de perfilado de clientes, y también
+> como advertencia adicional de posible colinealidad en V que vale la pena mencionar
+> junto con el hallazgo del Bloque 9 sobre las variables de W.
+
+---
+
+# Resumen de lo que entrega este script
+
+| Sección | Bloques | Para qué sirve en tu documento |
+|---|---|---|
+| Clasificación de variables | 3-4 | Justifica metodológicamente por qué se separan categóricas/numéricas y cómo se reconstruyen las dummies |
+| **Resumen general de variables** | **5** | Inventario completo: total, categóricas vs. numéricas, y valores posibles de cada una — para la sección "Variables del modelo" de tu documento |
+| Univariado | 6-7 | Sección "Distribución de las variables" — tablas y gráficos por variable |
+| Bivariado | 8-9 | Sección "Relación con la variable de respuesta" — primera evidencia de qué variables importan antes de modelar |
+| Multivariado | 10-11 | Sección "Diagnóstico de colinealidad" — versión documentada y explícita de lo que el Script 2 hizo silenciosamente |

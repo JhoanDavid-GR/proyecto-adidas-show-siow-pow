@@ -1,0 +1,2387 @@
+---
+title: "Pipeline POGIT — Adidas | Script 2: Matrices V, W e Y"
+author: "Tesis de Maestría"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  cache   = FALSE
+)
+```
+
+
+```{r bloque-0-source-script1, include=FALSE}
+# Este bloque carga survey_enriched en memoria corriendo el Script 1 (Apple).
+# Es necesario porque code2_adidas.Rmd depende de survey_enriched, que se
+# construye en code1.R. El survey es idéntico para Apple y Adidas, por lo
+# que usar el script original de la directora es correcto y suficiente.
+source("code1_survey.R", local = knitr::knit_global())
+```
+
+
+---
+
+> **Sobre este documento**
+> Este R Markdown corresponde al **Script 2** del pipeline POGIT aplicado a la marca **Adidas**.
+> Es la adaptación central del `code2.R` original (caso Apple), y contiene la mayoría de los cambios
+> propios de la marca focal: el universo de categorías de moda/calzado, el diccionario de 12 marcas
+> competidoras, las ventanas temporales calibradas sobre datos Adidas, y la construcción de todas
+> las matrices de entrada del modelo (V, W, Y).
+>
+> **Modificaciones respecto a `code2.R` (Apple):**
+>
+> | Etiqueta | Bloque | Descripción |
+> |----------|--------|-------------|
+> | MOD-01 | Bloque 4 | `fashion_keywords` + `fashion_pattern` reemplazan `electronics_pattern` |
+> | MOD-02 | Bloque 4 | `classify_category()` añade rama `"Fashion_Sport"` |
+> | MOD-03 | Bloque 5 | `brand_dict` cambia a 12 marcas de moda/calzado; `is_fashion_product()` reemplaza `is_tech_product()` |
+> | MOD-04 | Bloque 5 | `purchases_fashion` reemplaza `purchases_tech` |
+> | MOD-05 | Bloque 6 | `classify_fashion()` + 8 sub-categorías de moda reemplazan `classify_tech()` |
+> | MOD-06 | Bloque 7 | Ventanas T1/T2 recalibradas sobre datos Adidas |
+> | MOD-07 | Bloque 8 | `rfm_raw_2018` y `tech_flags` → `rfm_raw_adidas` y `fashion_flags` para Adidas |
+> | MOD-08 | Bloque 9 | `var_2023` mide gasto Adidas en T2 |
+> | MOD-09 | Bloque 10 | Eliminación severa calibrada sobre gasto Adidas |
+> | MOD-10 | Bloque 13 | `brand_count` y `brand_items` sobre marcas de moda |
+> | MOD-11 | Bloque 18 | PDF de firmas renombrado a `WithAdidas_buyers_plots_testdata.pdf` |
+> | MOD-12 | Bloque 20 | Output Excel renombrado a `matrices_data_adidas.xlsx` |
+> | MOD-13 | Bloque 11 | `empirical_sow.xlsx` → `empirical_sow_adidas.xlsx` |
+> | MOD-14 | Bloques 21, 23, 24, 25 | Ajustes visuales: todas las gráficas en español, fuente serif/Times, texto más grande, y exportación a PDF en la carpeta compartida `Graficas_Addidas` (la misma del Script 1) |
+> | MOD-15 | Bloque 28 | Se agregan las hojas `ids_train`/`ids_test` con el `response_id` de cada fila, para trazabilidad de cliente una vez que el Excel se usa fuera de esta sesión de R |
+
+---
+
+# Bloque 1 — Carga de paquetes
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque carga el subconjunto de paquetes necesarios para el Script 2. A diferencia del Script 1, que requería paquetes de modelación estadística avanzada, aquí el foco está en cuatro grandes grupos: **manipulación de datos** (`dplyr`, `tidyr`, `stringr`, `lubridate`), **visualización** (`ggplot2`, `patchwork`, `scales`), **exportación** (`openxlsx`) y **preprocesamiento estadístico** (`caret`, `fastDummies`). El paquete `tidymodels` se incluye como infraestructura para el Script 3, pero no se usa directamente aquí.
+
+La función `invisible(lapply(...))` es una forma compacta de cargar todos los paquetes en un solo comando sin imprimir los valores `TRUE/FALSE` de cada carga en la consola. Es ligeramente menos defensiva que la función `load_pkg()` del Script 1 (no detiene la ejecución si un paquete falla), pero suficiente para una sesión de trabajo interactiva donde el analista ya verificó la instalación.
+
+## Términos nuevos o poco comunes
+
+- **`invisible()`**: Suprime la impresión en consola del valor de retorno de una expresión. `lapply` devuelve una lista de valores `TRUE/FALSE`; envolverlo en `invisible()` evita que esa lista aparezca en el output sin afectar la carga de paquetes.
+- **`lapply()`**: Aplica una función a cada elemento de una lista o vector. Aquí aplica `require()` a cada nombre de paquete del vector `packages`.
+- **`caret`**: *Classification And REgression Training*. Paquete de R para modelación predictiva. En este script se usa específicamente para dos funciones de preprocesamiento: `nearZeroVar()` (elimina variables con varianza casi nula) y `findCorrelation()` (selección por correlación de Spearman).
+- **`fastDummies`**: Paquete especializado en crear variables dummy (indicadoras binarias) de forma eficiente, incluyendo control sobre la categoría de referencia y manejo de `NA`.
+
+```{r bloque-1-paquetes}
+packages <- c(
+  "dplyr","tidyr","stringr","tibble",
+  "readr","janitor","lubridate",
+  "ggplot2","scales","patchwork",
+  "fastDummies","openxlsx","caret",
+  "tidymodels"
+)
+invisible(lapply(packages, require, character.only = TRUE))
+```
+
+> **Output esperado:** Ningún output visible si todos los paquetes están instalados. Si alguno falta, R mostrará `Warning: package 'X' was not found`. En ese caso, instalar con `install.packages("X")` y reintentar.
+
+---
+
+# Bloque 2 — Helpers: winsorización Tukey sin data leakage
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque define las tres funciones que implementan la política de **winsorización sin fuga de datos** (*no data leakage*) entre el conjunto de entrenamiento y el de prueba, tal como se describe en el Apéndice 7 del paper. Es uno de los bloques más importantes del pipeline desde el punto de vista metodológico.
+
+El problema central que resuelve es el siguiente: cuando se preprocesan datos para un modelo predictivo, cualquier transformación que use información del conjunto de prueba (TEST) para calibrar parámetros contamina la evaluación del modelo, porque el modelo "conoce" indirectamente el TEST antes de ser evaluado. Esto se denomina *data leakage* y produce métricas de desempeño artificialmente optimistas.
+
+La solución implementada aquí es la **winsorización Tukey con caps estimados exclusivamente en TRAIN**: se calculan los umbrales de recorte usando solo los datos de entrenamiento, y esos mismos umbrales se aplican mecánicamente al TEST. El valor `k=3` corresponde a la "regla de Tukey extrema": cualquier valor por encima de `Q3 + 3 * IQR` se considera un outlier severo y se reemplaza por ese umbral. Esta regla es más conservadora que la regla estándar `k=1.5` y está justificada en el contexto de gasto en Amazon, donde la distribución tiene colas muy pesadas (algunos consumidores gastan órdenes de magnitud más que la mediana).
+
+Las tres funciones trabajan en conjunto: `tukey_cap_upper()` calcula el cap y winsoriza un vector, `apply_upper_cap()` aplica un cap ya conocido a un nuevo vector, y `winsorize_df_numeric_upper_trainonly()` orquesta el proceso completo sobre todas las columnas numéricas de un dataframe.
+
+## Términos nuevos o poco comunes
+
+- **Winsorización**: Técnica de manejo de outliers que recorta los valores extremos al límite del umbral, en lugar de eliminarlos. A diferencia de la eliminación, preserva el número de observaciones. El nombre proviene del estadístico Charles Winsor.
+- **IQR (Interquartile Range / Rango Intercuartílico)**: Diferencia entre el cuartil 75 (Q3) y el cuartil 25 (Q1). Mide la dispersión del 50% central de los datos, siendo robusto a outliers.
+- **Regla de Tukey (k=3)**: Umbral superior = Q3 + 3 × IQR. Valores por encima de este umbral se consideran "outliers extremos". Con k=1.5 se detectan outliers moderados; con k=3 solo los severos.
+- **Data leakage**: Contaminación de la evaluación del modelo cuando información del conjunto de prueba "se filtra" al proceso de entrenamiento o preprocesamiento. Produce estimaciones de desempeño infladas.
+- **Cap**: Valor límite superior aplicado durante la winsorización. Todo valor por encima del cap se reemplaza por el cap mismo.
+- **`stopifnot()`**: Función de R que detiene la ejecución con un error informativo si la condición evaluada es `FALSE`. Se usa como "contrato" explícito que debe cumplirse para continuar.
+
+```{r bloque-2-helpers-winsor}
+tukey_cap_upper <- function(x, k = 3) {
+  x_num <- suppressWarnings(as.numeric(x))
+  if (all(is.na(x_num))) return(list(x = x_num, cap = NA_real_, q3 = NA_real_, iqr = NA_real_))
+  
+  q <- stats::quantile(x_num, probs = c(0.25, 0.75), na.rm = TRUE, type = 7)
+  iqr <- as.numeric(q[2] - q[1])
+  q3  <- as.numeric(q[2])
+  cap <- q3 + k * iqr
+  
+  x_w <- x_num
+  x_w[!is.na(x_w) & x_w > cap] <- cap
+  list(x = x_w, cap = cap, q3 = q3, iqr = iqr)
+}
+
+apply_upper_cap <- function(x, cap) {
+  x_num <- suppressWarnings(as.numeric(x))
+  if (!is.finite(cap)) return(x_num)
+  x_num[!is.na(x_num) & x_num > cap] <- cap
+  x_num
+}
+
+winsorize_df_numeric_upper_trainonly <- function(df_train, df_test,
+                                                 id_col = "response_id",
+                                                 k = 3,
+                                                 cols = NULL) {
+  stopifnot(id_col %in% names(df_train), id_col %in% names(df_test))
+  
+  if (is.null(cols)) {
+    cols <- names(df_train)[sapply(df_train, is.numeric)]
+    cols <- setdiff(cols, id_col)
+  } else {
+    cols <- intersect(cols, names(df_train))
+    cols <- setdiff(cols, id_col)
+  }
+  
+  out_tr <- df_train
+  out_te <- df_test
+  caps <- list()
+  
+  for (cc in cols) {
+    tk <- tukey_cap_upper(out_tr[[cc]], k = k)
+    caps[[cc]] <- tk$cap
+    out_tr[[cc]] <- tk$x
+    out_te[[cc]] <- apply_upper_cap(out_te[[cc]], tk$cap)
+  }
+  
+  list(train = out_tr, test = out_te, caps = caps)
+}
+```
+
+> **Output esperado:** Ningún output visible. Las tres funciones quedan registradas en el entorno global de R. Se puede verificar con `exists("tukey_cap_upper")`, `exists("apply_upper_cap")` y `exists("winsorize_df_numeric_upper_trainonly")`, todas devolverán `TRUE`.
+
+---
+
+# Bloque 3 — Helper: alineación de IDs entre matrices
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque define `align_master_ids()`, una función de utilería que garantiza que las tres matrices del modelo (V, W y `var_adidas`) contengan exactamente los mismos `response_id` en el mismo orden. Esta alineación perfecta es una precondición absoluta del modelo POGIT: si las matrices tienen filas en distinto orden, el modelo asociaría las variables de un cliente con la respuesta de otro, generando estimaciones completamente inválidas sin producir ningún error explícito.
+
+El mecanismo es el siguiente: la función calcula la **intersección de los tres conjuntos de IDs** (clientes que aparecen en las tres fuentes simultáneamente), designa una de ellas como "maestra" que dicta el orden, y reordena las otras dos para que coincidan exactamente. Los dos `stopifnot()` al final verifican que los vectores de `response_id` sean byte-a-byte idénticos antes de devolver los resultados.
+
+Esta función es especialmente importante en el caso Adidas porque el universo de compradores de moda es diferente al de tecnología, y algunos clientes pueden tener datos en una fuente pero no en otra.
+
+## Términos nuevos o poco comunes
+
+- **`Reduce(intersect, list(...))`**: Aplica la función `intersect()` sucesivamente sobre una lista de vectores para obtener los elementos comunes a todos. `Reduce(f, list(a,b,c))` equivale a `f(f(a,b),c)`.
+- **`match()`**: Para cada elemento del primer vector, devuelve la posición donde ese elemento aparece en el segundo vector. Se usa para reordenar un dataframe según un vector de IDs de referencia.
+- **`distinct()`**: Elimina filas duplicadas. Se aplica aquí porque podría haber response_ids repetidos por errores en el proceso de construcción de las tablas intermedias.
+- **`switch()`**: Equivalente a un `if-else` encadenado para variables de texto. Selecciona una de las opciones según el valor del argumento `master` ("W", "V" o "var").
+- **`identical()`**: Verifica que dos objetos sean exactamente iguales, incluyendo tipo, longitud y valores. Más estricto que `==` porque no hay vectorización ni coerciones implícitas.
+
+```{r bloque-3-helper-align}
+align_master_ids <- function(V, W, var_2023, id_col = "response_id", master = c("W","V","var")) {
+  master <- match.arg(master)
+  
+  V <- V %>% distinct(.data[[id_col]], .keep_all = TRUE) %>% mutate(!!id_col := as.character(.data[[id_col]]))
+  W <- W %>% distinct(.data[[id_col]], .keep_all = TRUE) %>% mutate(!!id_col := as.character(.data[[id_col]]))
+  var_2023 <- var_2023 %>% distinct(.data[[id_col]], .keep_all = TRUE) %>% mutate(!!id_col := as.character(.data[[id_col]]))
+  
+  ids_common <- Reduce(intersect, list(V[[id_col]], W[[id_col]], var_2023[[id_col]]))
+  stopifnot(length(ids_common) > 0)
+  
+  ids_master <- switch(
+    master,
+    W   = W[[id_col]][W[[id_col]] %in% ids_common],
+    V   = V[[id_col]][V[[id_col]] %in% ids_common],
+    var = var_2023[[id_col]][var_2023[[id_col]] %in% ids_common]
+  )
+  
+  V_a   <- V[match(ids_master, V[[id_col]]), , drop = FALSE]
+  W_a   <- W[match(ids_master, W[[id_col]]), , drop = FALSE]
+  var_a <- var_2023[match(ids_master, var_2023[[id_col]]), , drop = FALSE]
+  
+  stopifnot(identical(V_a[[id_col]], W_a[[id_col]]))
+  stopifnot(identical(V_a[[id_col]], var_a[[id_col]]))
+  
+  list(V = V_a, W = W_a, var_2023 = var_a, ids = ids_master)
+}
+```
+
+> **Output esperado:** Ningún output visible. La función `align_master_ids()` queda disponible en el entorno global. Se usará más adelante para alinear V_full, W_full y var_adidas_full antes del split train/test.
+
+---
+
+# Bloque 4 — Carga de transacciones Amazon y macro-categorías
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-01 y MOD-02 — CAMBIO ADIDAS:** Se reemplaza `electronics_pattern` por `fashion_pattern` basado en keywords de moda/calzado/deporte. La función `classify_category()` incorpora una rama `"Fashion_Sport"` en lugar de `"Electronics"`.
+
+Este bloque realiza dos tareas fundamentales: cargar el archivo de transacciones de Amazon (el dataset más grande del pipeline, con más de 1.8 millones de registros) y asignar a cada producto una **macro-categoría** basada en texto.
+
+La carga con `readr::read_csv()` es seguida de detección dinámica de la columna `response_id`: en lugar de asumir el nombre exacto, se busca cualquier columna cuyo nombre contenga "response". Este diseño es robusto frente a variaciones de nomenclatura entre versiones del archivo. El `stopifnot(length(resp_col) == 1)` garantiza que haya exactamente una columna con ese patrón, fallando con un error explícito si hay ambigüedad.
+
+Los tres campos calculados (`purchase_price_per_unit`, `quantity`, `amount`) son la base de todo el análisis financiero posterior. El campo `amount = precio × cantidad` es lo que el paper denomina `total_price` y constituye la unidad de medida del gasto en Amazon a lo largo de todo el pipeline.
+
+Para Adidas, el `fashion_pattern` combina keywords del dominio de moda, calzado y artículos deportivos: términos como `shoe`, `sneaker`, `apparel`, `athletic`, `sportswear`, `jersey`, etc. Este patrón se aplica tanto al título del producto como a su categoría en el catálogo de Amazon, maximizando la cobertura del universo relevante. La macro-categoría `"Fashion_Sport"` captura todos los productos que matcheen este patrón y no hayan sido clasificados en una categoría más específica previamente.
+
+## Términos nuevos o poco comunes
+
+- **`clean_names()`**: Estandariza los nombres de columna a `snake_case`. Especialmente importante aquí porque el CSV de Amazon tiene nombres con espacios y mayúsculas (`Purchase Price Per Unit` → `purchase_price_per_unit`).
+- **`str_detect()`**: Función de `stringr` que devuelve `TRUE` si una cadena contiene un patrón (expresión regular). Se usa masivamente en este script para clasificar productos por texto.
+- **`case_when()`**: Equivalente vectorizado de múltiples `if-else`. El orden de las condiciones importa: la primera que se cumpla para cada fila gana.
+- **`(?i)`**: Modificador de expresión regular que activa el modo *case-insensitive* (sin distinción de mayúsculas/minúsculas). Equivale a `ignore_case = TRUE` en `stringr::regex()`.
+- **`coalesce()`**: Devuelve el primer valor no-`NA` de una lista de columnas. Se usa para manejar productos sin título (`title`) usando una cadena vacía como fallback.
+- **`str_squish()`**: Elimina espacios en blanco múltiples y recorta los extremos de una cadena. Normaliza el texto antes de aplicar los patrones de detección de marca.
+- **`paste(..., collapse = "|")`**: Une los elementos de un vector con el separador `|`, creando un patrón de regex de tipo OR (`keyword1|keyword2|keyword3`).
+
+```{r bloque-4-carga-transacciones}
+# [MOD-01] fashion_keywords reemplaza electronics_keywords
+fashion_keywords <- c(
+  # Calzado
+  "\\bshoe[s]?\\b", "\\bsneaker[s]?\\b", "\\bboot[s]?\\b", "\\bsandal[s]?\\b",
+  "\\bslipper[s]?\\b", "\\bloafer[s]?\\b", "\\bcleat[s]?\\b", "\\bstud[s]?\\b",
+  "\\bfootball boot[s]?\\b", "\\brunning shoe[s]?\\b", "\\btrainer[s]?\\b",
+  # Ropa
+  "\\bapparel\\b", "\\bclothing\\b", "\\bshirt[s]?\\b", "\\bt-shirt[s]?\\b",
+  "\\bjacket[s]?\\b", "\\bpant[s]?\\b", "\\bshort[s]?\\b", "\\bsock[s]?\\b",
+  "\\blegging[s]?\\b", "\\bsweatshirt[s]?\\b", "\\bhoodie[s]?\\b",
+  "\\bjerse[y|ys]\\b", "\\btop[s]?\\b", "\\btights\\b", "\\btracksuit[s]?\\b",
+  "\\bsportswear\\b", "\\bathleticwear\\b", "\\bactivewear\\b",
+  # Accesorios deportivos
+  "\\bbackpack[s]?\\b", "\\bsports bag[s]?\\b", "\\bgym bag[s]?\\b",
+  "\\bhat[s]?\\b", "\\bcap[s]?\\b", "\\bbeanie[s]?\\b", "\\bglove[s]?\\b",
+  "\\bwristband[s]?\\b", "\\bheadband[s]?\\b", "\\bscarf\\b",
+  # Deporte / performance
+  "\\bathletic\\b", "\\bsport[s]?\\b", "\\bfitness\\b", "\\brunning\\b",
+  "\\btraining\\b", "\\bworkout\\b", "\\bgymnastics\\b", "\\byoga\\b",
+  "\\bsoccer\\b", "\\bbasketball\\b", "\\btennis\\b", "\\bgolf\\b"
+)
+fashion_pattern <- paste(fashion_keywords, collapse = "|")
+
+# [MOD-02] classify_category incluye rama Fashion_Sport
+classify_category <- function(cat) {
+  dplyr::case_when(
+    stringr::str_detect(cat, "(?i)book|ebook|dvd|blu[-_ ]?ray|video_games?")                          ~ "Media",
+    stringr::str_detect(cat, "(?i)beauty|cosmetic|hair_|skin|lotion|fragrance")                       ~ "Beauty_PersonalCare",
+    stringr::str_detect(cat, "(?i)grocery|food|snack|beverage|coffee|tea|candy")                      ~ "Grocery",
+    stringr::str_detect(cat, "(?i)kitchen|cook|bake|dinnerware|utensil|cookware")                     ~ "Kitchen_Dining",
+    stringr::str_detect(cat, "(?i)home_|furniture|decor|bedding|lamp|curtain|rug")                    ~ "Home_Living",
+    stringr::str_detect(cat, "(?i)electronics?|computer|laptop|smartphone|\\btv\\b|tablet|printer")   ~ "Electronics",
+    stringr::str_detect(cat, "(?i)toy|game|lego|puzzle|doll|costume")                                 ~ "Toys_Games",
+    stringr::str_detect(cat, "(?i)pet_|animal")                                                       ~ "Pet_Supplies",
+    stringr::str_detect(cat, "(?i)baby_")                                                             ~ "Baby",
+    stringr::str_detect(cat, "(?i)auto|car|vehicle|engine|tire")                                      ~ "Automotive",
+    stringr::str_detect(cat, stringr::regex(fashion_pattern, ignore_case = TRUE))                     ~ "Fashion_Sport",
+    TRUE                                                                                              ~ "Other"
+  )
+}
+
+# Carga del archivo de transacciones Amazon
+purchases <- readr::read_csv(
+  "data/survey-data/amazon-purchases.csv",
+  show_col_types = FALSE
+) |> janitor::clean_names()
+
+resp_col <- names(purchases)[stringr::str_detect(names(purchases), "response")]
+stopifnot(length(resp_col) == 1)
+
+purchases0 <- purchases %>%
+  dplyr::rename(response_id = !!resp_col) %>%
+  dplyr::mutate(
+    response_id = as.character(response_id),
+    order_date  = lubridate::as_date(order_date),
+    dplyr::across(c(purchase_price_per_unit, quantity), as.numeric),
+    amount = purchase_price_per_unit * quantity
+  )
+
+# Clasificación de macro-categorías
+purchases_cat <- purchases0 %>%
+  dplyr::mutate(
+    broad_cat = classify_category(category) |> factor(),
+    title_lc  = stringr::str_squish(stringr::str_to_lower(dplyr::coalesce(title, "")))
+  )
+
+message("Transacciones cargadas: ", nrow(purchases_cat), " filas")
+message("Macro-categorías: ", paste(levels(purchases_cat$broad_cat), collapse = ", "))
+```
+
+> **Output esperado:** Dos mensajes en consola: el número total de transacciones cargadas (aprox. 1.8M) y la lista de macro-categorías asignadas. Si el archivo no se encuentra, R devolverá un error de tipo `cannot open file`. Verificar que el directorio de trabajo apunte a la raíz del proyecto.
+
+---
+
+# Bloque 5 — Diccionario de marcas Adidas + clasificación
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-03 y MOD-04 — CAMBIO ADIDAS:** `brand_dict` cambia de 26 marcas tecnológicas a 12 marcas del universo de moda/calzado deportivo. `is_fashion_product()` reemplaza `is_tech_product()`. El objeto `purchases_fashion` reemplaza `purchases_tech`.
+
+Este bloque construye el **universo de productos relevantes para Adidas**: primero define qué productos son de moda/calzado (`is_fashion_product()`), luego identifica la marca de cada uno (`extract_brand()`), y finalmente filtra el dataframe al universo de moda (`purchases_fashion`).
+
+El `brand_dict` contiene los 12 competidores directos de Adidas en el espacio de calzado y ropa deportiva: Nike, Puma, Reebok, Under Armour, New Balance, Vans, Converse, Skechers, Fila, Champion, Timberland y North Face. Estos fueron identificados en el análisis exploratorio como las marcas con presencia significativa en las transacciones de Amazon del panel. Adidas no aparece en `brand_dict` porque es la **marca focal**: se detecta por separado en los bloques de RFM y construcción de Y.
+
+La lógica de `tech_brand` del código original se adapta aquí como `fashion_brand`: si el producto es de moda y su título contiene una marca del diccionario, se etiqueta con esa marca; si es de moda pero no se detecta marca conocida, se etiqueta como `"Generic"` (marca desconocida o de bajo volumen); si no es de moda, recibe `NA`. Los dos `stopifnot()` finales verifican que el universo de moda esté completamente etiquetado.
+
+Desde el punto de vista del modelo POGIT, este universo define el denominador del **Share of Wallet**: el gasto total del cliente en moda/calzado en Amazon es el denominador, y el gasto en Adidas es el numerador. Una definición correcta del universo es crítica: si es muy amplia (incluye productos no competidores) subestima el SoW de Adidas; si es muy estrecha (excluye competidores relevantes) lo sobreestima.
+
+## Términos nuevos o poco comunes
+
+- **Diccionario de marcas (`brand_dict`)**: Tabla de dos columnas: `pattern` (expresión regular para detectar la marca en el texto del producto) y `brand` (nombre canónico de la marca). El patrón usa `\\b` (word boundary) para evitar falsos positivos (ej: "nike" dentro de "unlike").
+- **`\\b`**: Metacarácter de expresión regular que marca el límite entre un carácter de palabra y uno que no lo es. Garantiza que "nike" no matchee en "unlike" o "multinike".
+- **`vapply()`**: Como `sapply()` pero con tipo de retorno garantizado. Aquí se usa en `extract_brand()` para aplicar la detección de marca fila por fila, garantizando que el resultado sea siempre un vector de caracteres.
+- **`if_else()`**: Versión vectorizada y tipada de `ifelse()` del tidyverse. Más estricta: los valores de verdadero y falso deben ser del mismo tipo.
+- **`NA_character_`**: Valor `NA` explícitamente tipado como carácter. Importante para mantener consistencia de tipo en columnas de texto.
+- **Marca focal**: En el modelo POGIT, la marca cuyo SoW y SioW se está estimando. En este pipeline, Adidas es la marca focal. Todos los cálculos de RFM, Y y SoW empírico se hacen sobre Adidas.
+
+```{r bloque-5-brand-dict}
+# [MOD-03] brand_dict: 12 competidores de moda/calzado deportivo
+brand_dict <- tibble::tibble(
+  pattern = c(
+    "\\bnike\\b",
+    "\\bpuma\\b",
+    "\\breebok\\b",
+    "under armour|\\bua\\b",
+    "new balance",
+    "\\bvans\\b",
+    "\\bconverse\\b",
+    "\\bskechers\\b",
+    "\\bfila\\b",
+    "\\bchampion\\b",
+    "\\btimberland\\b",
+    "north face|\\btnf\\b"
+  ),
+  brand = c(
+    "Nike", "Puma", "Reebok", "Under_Armour",
+    "New_Balance", "Vans", "Converse", "Skechers",
+    "Fila", "Champion", "Timberland", "North_Face"
+  )
+)
+
+# [MOD-03] is_fashion_product reemplaza is_tech_product
+is_fashion_product <- function(title_lc, broad_cat) {
+  by_title <- stringr::str_detect(
+    title_lc,
+    stringr::regex(fashion_pattern, ignore_case = TRUE)
+  )
+  (by_title | broad_cat == "Fashion_Sport") %in% TRUE
+}
+
+extract_brand <- function(title_lc) {
+  vapply(title_lc, function(t) {
+    idx <- which(stringr::str_detect(
+      t, stringr::regex(brand_dict$pattern, ignore_case = TRUE)
+    ))
+    if (length(idx) == 0) NA_character_ else brand_dict$brand[idx[1]]
+  }, character(1))
+}
+
+# Clasificación: is_fashion + detección de marca competidora
+# Nota: Adidas se detecta en bloques posteriores (RFM, Y), no aquí
+purchases_cat <- purchases_cat %>%
+  dplyr::mutate(
+    is_fashion      = is_fashion_product(title_lc, broad_cat),
+    fashion_brand_raw = dplyr::if_else(is_fashion, extract_brand(title_lc), NA_character_),
+    fashion_brand     = dplyr::if_else(
+      is_fashion & is.na(fashion_brand_raw), "Generic", fashion_brand_raw
+    )
+  ) %>%
+  dplyr::select(-fashion_brand_raw)
+
+stopifnot(!any(is.na(purchases_cat$is_fashion)))
+stopifnot(with(purchases_cat, all(!is.na(fashion_brand[is_fashion]))))
+
+# [MOD-04] purchases_fashion reemplaza purchases_tech
+purchases_fashion <- purchases_cat %>% dplyr::filter(is_fashion)
+
+message("Universo de moda/calzado (purchases_fashion): ", nrow(purchases_fashion), " transacciones")
+message("Clientes únicos con compras de moda: ", dplyr::n_distinct(purchases_fashion$response_id))
+```
+
+> **Output esperado:** Dos mensajes con el número de transacciones del universo de moda y el número de clientes únicos. El universo de moda será significativamente menor que el total de transacciones (que incluye electrónica, comida, etc.).
+
+---
+
+# Bloque 6 — Sub-categorías de moda (fashion macro-categories)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-05 — CAMBIO ADIDAS:** `classify_fashion()` con 8 sub-categorías de moda/calzado reemplaza `classify_tech()` con sub-categorías de electrónica. `purchases_fashion2` reemplaza `purchases_tech2`.
+
+Dentro del universo de moda, este bloque crea **8 sub-categorías más granulares** que permiten capturar el tipo específico de producto que compra cada cliente. Esta granularidad es importante para la construcción de las `fashion_flags` (indicadores del tipo de producto Adidas comprado en T1), que entran como covariables en la matriz W del modelo.
+
+Las 8 sub-categorías son: `Footwear` (calzado de todo tipo), `Tops_Shirts` (camisetas, tops, sudaderas), `Bottoms` (pantalones, shorts, leggings), `Outerwear` (chaquetas, abrigos), `Accessories` (gorras, mochilas, guantes), `Socks_Underwear` (calcetines, ropa interior), `Athletic_Gear` (artículos de deporte específicos) y `Other_Fashion` (resto). El orden en `case_when()` importa: las categorías más específicas van primero.
+
+El filtro adicional en `purchases_fashion2` elimina productos que no matcheen ninguna de las 8 sub-categorías, limpiando el universo a moda "clasificada" y bien definida. Esto evita que productos ambiguos (ej: artículos de camping que podrían ser de deporte o de hogar) contaminen el análisis.
+
+## Términos nuevos o poco comunes
+
+- **Sub-categorías (`fashion_macro`)**: Variable categórica con 8 niveles que clasifica cada producto de moda en un tipo más específico. Cada nivel corresponde a un tipo de producto que Adidas vende, permitiendo modelar diferencias de comportamiento entre, por ejemplo, compradores de calzado vs compradores de ropa.
+- **`fashion_flags`**: Variables indicadoras binarias (0/1) que se construirán en el Bloque 8, una por sub-categoría. Indican si el cliente compró productos Adidas de ese tipo en T1.
+- **`filter()` con regex combinado**: El filtro que elimina "Other_Fashion" usa la misma lógica que `classify_fashion()`: solo conserva transacciones cuya categoría matchee al menos uno de los 7 patrones nombrados.
+- **`unit_price` y `total_price`**: Alias semánticos añadidos a `purchase_price_per_unit` y `amount` respectivamente. Hacen el código más legible y consistente con la nomenclatura del paper.
+
+```{r bloque-6-subcategorias-moda}
+# [MOD-05] Patrones de sub-categorías de moda
+footwear_pattern <- paste(
+  c("\\bshoe[s]?\\b","\\bsneaker[s]?\\b","\\bboot[s]?\\b","\\bsandal[s]?\\b",
+    "\\bslipper[s]?\\b","\\bloafer[s]?\\b","\\bcleat[s]?\\b","\\btrainer[s]?\\b"),
+  collapse = "|"
+)
+
+tops_pattern <- paste(
+  c("\\bshirt[s]?\\b","\\bt-shirt[s]?\\b","\\bsweatshirt[s]?\\b","\\bhoodie[s]?\\b",
+    "\\bjerse[y|ys]\\b","\\btop[s]?\\b","\\btank[s]?\\b"),
+  collapse = "|"
+)
+
+bottoms_pattern <- paste(
+  c("\\bpant[s]?\\b","\\bshort[s]?\\b","\\blegging[s]?\\b","\\btight[s]?\\b",
+    "\\btracksuit[s]?\\b","\\bjogger[s]?\\b"),
+  collapse = "|"
+)
+
+outerwear_pattern <- paste(
+  c("\\bjacket[s]?\\b","\\bcoat[s]?\\b","\\bwindbreaker[s]?\\b","\\bgilet[s]?\\b"),
+  collapse = "|"
+)
+
+accessories_pattern <- paste(
+  c("\\bbackpack[s]?\\b","\\bgym bag[s]?\\b","\\bsports bag[s]?\\b",
+    "\\bhat[s]?\\b","\\bcap[s]?\\b","\\bbeanie[s]?\\b",
+    "\\bglove[s]?\\b","\\bscarf\\b","\\bwristband[s]?\\b","\\bheadband[s]?\\b"),
+  collapse = "|"
+)
+
+socks_pattern <- paste(
+  c("\\bsock[s]?\\b","\\bunderwear\\b","\\bbra[s]?\\b","\\bboxer[s]?\\b"),
+  collapse = "|"
+)
+
+athletic_gear_pattern <- paste(
+  c("\\bshin guard[s]?\\b","\\bknee pad[s]?\\b","\\belbow pad[s]?\\b",
+    "\\bprotector[s]?\\b","\\bsupport[s]?\\b","\\bbrace[s]?\\b"),
+  collapse = "|"
+)
+
+# [MOD-05] classify_fashion: asigna sub-categoría de moda
+classify_fashion <- function(cat) {
+  dplyr::case_when(
+    stringr::str_detect(cat, stringr::regex(footwear_pattern,      ignore_case = TRUE)) ~ "Footwear",
+    stringr::str_detect(cat, stringr::regex(tops_pattern,          ignore_case = TRUE)) ~ "Tops_Shirts",
+    stringr::str_detect(cat, stringr::regex(bottoms_pattern,       ignore_case = TRUE)) ~ "Bottoms",
+    stringr::str_detect(cat, stringr::regex(outerwear_pattern,     ignore_case = TRUE)) ~ "Outerwear",
+    stringr::str_detect(cat, stringr::regex(accessories_pattern,   ignore_case = TRUE)) ~ "Accessories",
+    stringr::str_detect(cat, stringr::regex(socks_pattern,         ignore_case = TRUE)) ~ "Socks_Underwear",
+    stringr::str_detect(cat, stringr::regex(athletic_gear_pattern, ignore_case = TRUE)) ~ "Athletic_Gear",
+    TRUE ~ "Other_Fashion"
+  )
+}
+
+# [MOD-05] purchases_fashion2: universo filtrado y clasificado
+all_fashion_patterns <- paste(
+  c(footwear_pattern, tops_pattern, bottoms_pattern, outerwear_pattern,
+    accessories_pattern, socks_pattern, athletic_gear_pattern),
+  collapse = "|"
+)
+
+purchases_fashion2 <- purchases_fashion %>%
+  dplyr::filter(
+    stringr::str_detect(
+      category,
+      stringr::regex(all_fashion_patterns, ignore_case = TRUE)
+    )
+  ) %>%
+  dplyr::mutate(
+    response_id    = as.character(response_id),
+    fashion_macro  = classify_fashion(category) |> factor(),
+    unit_price     = purchase_price_per_unit,
+    total_price    = amount
+  )
+
+message("purchases_fashion2 (clasificado): ", nrow(purchases_fashion2), " transacciones")
+message("Sub-categorías de moda: ", paste(levels(purchases_fashion2$fashion_macro), collapse = ", "))
+```
+
+> **Output esperado:** Dos mensajes: número de transacciones en el universo de moda clasificado y la lista de sub-categorías. El número de transacciones en `purchases_fashion2` será menor que en `purchases_fashion` por el filtro de sub-categorías.
+
+---
+
+# Bloque 7 — Ventanas temporales T1 y T2 para Adidas
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-06 — CAMBIO ADIDAS:** Las fechas de referencia `ref_date1` y `ref_date4` se calculan dinámicamente desde los datos **Adidas** (no Apple). `ref_date2` y `ref_date3` (el corte T1/T2) se mantienen iguales al caso Apple para comparabilidad metodológica.
+
+Las ventanas temporales son la columna vertebral del diseño del estudio. El paper divide el período de observación en dos ventanas:
+
+- **T1** (desde `ref_date1` hasta `ref_date2 = 2021-10-31`): ventana de **features**. Todo lo que el cliente hizo en esta ventana se usa para construir las variables predictoras (RFM, features de 12 meses, flags de sub-categoría).
+- **T2** (desde `ref_date3 = 2021-11-01` hasta `ref_date4`): ventana de **respuesta**. El gasto del cliente en Adidas durante esta ventana es lo que el modelo intenta predecir (variable Y).
+
+La razón de cortar en noviembre de 2021 es que T2 captura la temporada de alto consumo (Black Friday, Navidad, vuelta al cole del año siguiente), que es cuando las diferencias de lealtad de marca son más pronunciadas. Clientes con alta lealtad a Adidas concentrarán más su gasto en esa marca durante T2, independientemente del nivel general de consumo.
+
+El cálculo dinámico de `min_date` y `max_date` garantiza que el pipeline sea robusto: si la base de datos se actualiza con más transacciones, las fechas se ajustan automáticamente. El filtro `total_price > 0` excluye devoluciones y transacciones con precio cero que contaminarían el rango de fechas.
+
+## Términos nuevos o poco comunes
+
+- **Ventana temporal (T1/T2)**: Partición del período de observación en dos sub-períodos. T1 es el "pasado observable" usado para construir variables; T2 es el "futuro a predecir". Esta estructura es estándar en modelos de valor de cliente (*Customer Lifetime Value*).
+- **`lubridate::ymd()`**: Convierte una cadena de texto en formato "YYYY-MM-DD" a un objeto de tipo `Date` de R. Más robusto que `as.Date()` para formatos ISO 8601.
+- **`dplyr::between()`**: Equivalente a `x >= left & x <= right`. Filtra registros en un rango de fechas cerrado (incluye ambos extremos).
+- **`summarise()` con `.groups = "drop"`**: Al agregar datos con `group_by() + summarise()`, R mantiene el agrupamiento en el resultado por defecto. `.groups = "drop"` elimina el agrupamiento explícitamente para que el dataframe resultante sea plano.
+- **`has_order_id`**: Flag booleano que detecta si el dataframe tiene una columna `order_id`. Si existe, se pueden contar órdenes únicas para la frecuencia RFM; si no, se cuentan filas.
+
+```{r bloque-7-ventanas-temporales}
+# [MOD-06] Ventanas T1/T2 calibradas sobre datos Adidas
+ref_date1a <- lubridate::ymd("2018-01-01")
+ref_date2a <- lubridate::ymd("2024-12-31")
+
+# Detección dinámica de rango de fechas Adidas en los datos
+date_range_adidas <- purchases_fashion2 %>%
+  dplyr::filter(
+    stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+    dplyr::between(order_date, ref_date1a, ref_date2a),
+    total_price > 0
+  ) %>%
+  dplyr::summarise(
+    min_date = min(order_date, na.rm = TRUE),
+    max_date = max(order_date, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+min_date <- date_range_adidas$min_date[[1]]
+max_date <- date_range_adidas$max_date[[1]]
+stopifnot(!is.na(min_date), !is.na(max_date))
+
+# Ventanas finales
+ref_date1 <- min_date
+ref_date2 <- lubridate::ymd("2021-10-31")  # Fin de T1 (features)
+ref_date3 <- lubridate::ymd("2021-11-01")  # Inicio de T2 (respuesta)
+ref_date4 <- max_date
+
+has_order_id <- "order_id" %in% names(purchases_fashion2)
+
+message("Rango Adidas en datos: ", min_date, " → ", max_date)
+message("Ventana T1 (features): ", ref_date1, " → ", ref_date2)
+message("Ventana T2 (respuesta): ", ref_date3, " → ", ref_date4)
+```
+
+> **Output esperado:** Tres mensajes con el rango real de los datos Adidas y las dos ventanas temporales. `ref_date1` debería ser alrededor de 2018 (inicio del panel). Si `min_date` o `max_date` son `NA`, significa que no hay transacciones Adidas en el rango de búsqueda; verificar el patrón de detección `"\\badidas\\b"`.
+
+---
+
+# Bloque 8 — RFM de Adidas en T1 + fashion_flags
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-07 — CAMBIO ADIDAS:** `rfm_raw_2018` se calcula sobre transacciones Adidas (no Apple). `tech_flags` se reemplaza por `fashion_flags` con las 8 sub-categorías de moda.
+
+Este bloque construye las variables **RFM** (*Recency, Frequency, Monetary*) de Adidas en la ventana T1. RFM es el framework más utilizado en marketing cuantitativo para caracterizar el comportamiento de compra de un cliente respecto a una marca específica:
+
+- **Recency** (`recency_days_adidas`): días transcurridos desde la última compra Adidas hasta el final de T1. Un valor bajo indica que el cliente compró recientemente (alta lealtad activa). Se calcula como `ref_date2 - max(order_date)`.
+- **Frequency** (`frequency_adidas`): número de órdenes únicas de Adidas en T1. Captura la regularidad del comportamiento de compra.
+- **Monetary** (`monetary_adidas`): gasto total en Adidas durante T1, en dólares. Junto con frequency, es el predictor más importante del SoW según los resultados del paper original (Apple: β_frequency=0.622, β_monetary=0.347, ambos p<0.01).
+
+Las `fashion_flags` son indicadores binarios que registran si el cliente compró productos Adidas de cada sub-categoría en T1: `Footwear`, `Tops_Shirts`, `Bottoms`, etc. Estos flags capturan el **tipo de relación** del cliente con Adidas: un cliente que solo compra calzado Adidas tiene un perfil diferente al que también compra ropa y accesorios. Solo se incluyen clientes que aparecen en `rfm_raw_adidas` (compradores de Adidas en T1): el `right_join` garantiza que el resultado tenga exactamente los mismos IDs que el RFM.
+
+El `response_id` se filtra usando `stringr::str_detect(title_lc, "\\badidas\\b")`: se busca la palabra "adidas" en el título del producto. Este enfoque basado en texto del título es más robusto que confiar solo en la columna `category` o en `fashion_brand`, porque Adidas no siempre aparece como marca registrada en el catálogo de Amazon.
+
+## Términos nuevos o poco comunes
+
+- **RFM**: Framework de segmentación de clientes basado en tres métricas de comportamiento: Recency (cuándo compró por última vez), Frequency (con qué frecuencia compra) y Monetary (cuánto gasta). Introducido por Hughes (1994) y ampliamente usado en CRM y marketing directo.
+- **`right_join()`**: Une dos dataframes manteniendo todas las filas del dataframe **derecho**. Aquí garantiza que `fashion_flags` tenga exactamente los mismos IDs que `rfm_raw_adidas`, incluso si un cliente no compró en alguna sub-categoría.
+- **`pivot_wider()` con `names_expand = TRUE`**: Garantiza que todas las sub-categorías de `fashion_macro` aparezcan como columnas en el resultado, incluso si ningún cliente de la muestra compró en esa sub-categoría. Sin este argumento, una sub-categoría con cero compradores simplemente no aparecería como columna.
+- **`coalesce(x, 0L)`**: Reemplaza `NA` por `0L` (entero). Los `NA` en las flags provienen del `right_join` para clientes que no compraron en esa sub-categoría; son conceptualmente ceros.
+- **`n_distinct(order_id)`**: Cuenta el número de órdenes únicas. Un cliente puede tener múltiples productos en una misma orden (mismo `order_id`); contar órdenes en lugar de filas da una medida más precisa de la frecuencia de visita a Amazon.
+
+```{r bloque-8-rfm-adidas}
+# [MOD-07] RFM de Adidas en T1
+rfm_raw_adidas <- purchases_fashion2 %>%
+  dplyr::filter(
+    stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+    dplyr::between(order_date, ref_date1, ref_date2),
+    total_price > 0
+  ) %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    recency_days_adidas = as.numeric(ref_date2 - max(order_date, na.rm = TRUE)),
+    frequency_adidas    = if (has_order_id) dplyr::n_distinct(order_id) else dplyr::n(),
+    monetary_adidas     = sum(total_price, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+message("Clientes con compras Adidas en T1: ", nrow(rfm_raw_adidas))
+
+# [MOD-07] fashion_flags: indicadores de sub-categoría Adidas en T1
+fashion_flags <- purchases_fashion2 %>%
+  dplyr::filter(
+    stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+    dplyr::between(order_date, ref_date1, ref_date2)
+  ) %>%
+  dplyr::select(response_id, fashion_macro) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(flag = 1L) %>%
+  tidyr::pivot_wider(
+    names_from   = fashion_macro,
+    values_from  = flag,
+    values_fill  = list(flag = 0L),
+    names_prefix = "2018_Adidas_fashion_",
+    names_expand = TRUE
+  ) %>%
+  dplyr::right_join(dplyr::select(rfm_raw_adidas, response_id), by = "response_id") %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::starts_with("2018_Adidas_fashion_"),
+      ~ dplyr::coalesce(.x, 0L)
+    )
+  )
+
+message("fashion_flags construidas: ", ncol(fashion_flags) - 1, " columnas (sub-categorías Adidas)")
+```
+
+> **Output esperado:** Dos mensajes: número de clientes que compraron Adidas en T1 (la "cohorte Adidas") y número de fashion_flags construidas (debería ser 8, una por sub-categoría). Si la cohorte es 0, verificar que el patrón `"\\badidas\\b"` detecte correctamente los productos.
+
+---
+
+# Bloque 9 — Variable de respuesta cruda: gasto Adidas en T2
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-08 — CAMBIO ADIDAS:** `var_2023` mide el gasto en **Adidas** (no Apple) durante T2. El campo se llama `amount_adidas` en lugar de `amount_2023_Apple`.
+
+Este bloque calcula la **variable de respuesta cruda** del modelo: el gasto total de cada cliente en productos Adidas durante la ventana T2. Este valor, que llamamos `amount_adidas`, es lo que el modelo POGIT intenta predecir (después de discretizarlo en el Bloque 14).
+
+Es importante entender qué significa un valor de `amount_adidas = 0`: no indica un error de datos, sino que ese cliente (que sí compró Adidas en T1 y por eso está en la cohorte) **no compró Adidas en T2**. Esto es un dato válido y valioso: permite al modelo aprender qué características distinguen a los clientes que mantienen su relación con Adidas de los que la abandonan en el período de evaluación.
+
+El `replace_na(0)` convierte los `NA` que quedarían para clientes sin compras Adidas en T2 (que no aparecerían en la agregación por `group_by`) en ceros explícitos. Este paso se hace **antes** de la eliminación severa y del split, porque la asignación de ceros es parte de la definición del universo, no del preprocesamiento.
+
+La winsorización **NO se aplica en este bloque**, siguiendo el principio de no data leakage: los caps se estimarán exclusivamente sobre el conjunto de entrenamiento en el Bloque 15.
+
+## Términos nuevos o poco comunes
+
+- **Variable de respuesta (Y)**: En el modelo POGIT, la variable que se quiere predecir. Aquí es el gasto en Adidas en T2, transformado a conteos enteros mediante discretización. También llamada variable dependiente u outcome.
+- **Cohorte**: En estudios longitudinales, grupo de individuos definido por haber experimentado un evento en un período específico. Aquí, la cohorte Adidas son los clientes que compraron Adidas en T1.
+- **Cero estructural vs. cero observacional**: Los ceros en `amount_adidas` son "ceros verdaderos": el cliente tuvo la oportunidad de comprar (estaba en el panel) pero eligió no comprar Adidas en T2. No son datos faltantes ni errores.
+- **`semi_join()`**: Filtra el dataframe izquierdo conservando solo las filas cuyo `response_id` aparece en el dataframe derecho, sin añadir columnas del segundo. Se usa para alinear `var_adidas` con `rfm_raw_adidas` (cohorte de compradores T1).
+
+```{r bloque-9-var-respuesta}
+# [MOD-08] Gasto Adidas en T2 (variable de respuesta cruda)
+var_adidas <- purchases_fashion2 %>%
+  dplyr::filter(
+    stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+    dplyr::between(order_date, ref_date3, ref_date4)
+  ) %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    amount_adidas = sum(total_price, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(amount_adidas = tidyr::replace_na(amount_adidas, 0))
+
+message("Clientes con compras Adidas en T2: ", nrow(var_adidas))
+message("Gasto promedio Adidas en T2 (compradores): $",
+        round(mean(var_adidas$amount_adidas[var_adidas$amount_adidas > 0]), 2))
+```
+
+
+> **Output esperado:** Dos mensajes: número de clientes con compras Adidas en T2 y gasto promedio entre los que sí compraron. El número en T2 será menor al de T1 (no todos los compradores de T1 repiten en T2).
+
+---
+
+# Bloque 10 — Eliminación severa de outliers globales
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-09 — CAMBIO ADIDAS:** El umbral `SEVERE_THRESHOLD` y la variable evaluada son `amount_adidas` (no `amount_2023_Apple`). El umbral de $5,000 se mantiene del caso Apple por comparabilidad metodológica.
+
+Este bloque implementa la **primera etapa del manejo de outliers** (Apéndice 7 del paper): la eliminación total de clientes con gasto extraordinariamente anómalo en Adidas durante T2. A diferencia de la winsorización (que conserva los clientes pero recorta sus valores), aquí se **eliminan completamente los IDs** del universo analítico.
+
+La justificación de eliminar en lugar de winsorizarr es que un gasto de más de $5,000 en Adidas en Amazon en un período de aproximadamente un año es altamente improbable para un consumidor individual: probablemente corresponde a una cuenta corporativa, un revendedor, o un error de datos. Incluir estos casos en el modelo distorsionaría la estimación de los parámetros porque el modelo intentaría ajustarse a comportamientos que no son representativos de ningún segmento de consumidores.
+
+La eliminación se aplica en **cascada** a todos los dataframes derivados: `var_adidas`, `purchases_fashion2`, `purchases_fashion`, `purchases_cat` y `purchases0`. Esto garantiza que ninguna tabla secundaria contenga transacciones de los IDs eliminados, lo que podría contaminar cálculos de gasto total o de variables de control.
+
+## Términos nuevos o poco comunes
+
+- **Outlier severo**: Observación tan alejada del patrón general que es improbable que represente el fenómeno de interés. Su inclusión puede sesgar los estimadores hacia valores no representativos.
+- **Eliminación en cascada**: Propagación de la eliminación de IDs a todos los dataframes que los referencian, garantizando consistencia del universo analítico en todas las tablas.
+- **`pull()`**: Extrae una columna de un dataframe como vector. Equivale a `df$columna` pero funciona dentro de pipes (`%>%`).
+- **`filter(!response_id %in% anomalous_ids_severe)`**: Operador lógico que conserva solo las filas cuyo `response_id` NO está en el vector de IDs anómalos. El `!` niega la condición y `%in%` verifica pertenencia al vector.
+- **`semi_join(rfm_raw_adidas)`**: Después de la eliminación, este filtro garantiza que `var_adidas` solo conserve IDs de la cohorte Adidas (compradores en T1). Implementa el criterio de inclusión "al menos una compra Adidas en T1".
+
+```{r bloque-10-eliminacion-severa}
+# [MOD-09] Eliminación severa: amount_adidas > SEVERE_THRESHOLD
+SEVERE_THRESHOLD <- 5000
+
+anomalous_ids_severe <- var_adidas %>%
+  dplyr::filter(amount_adidas > SEVERE_THRESHOLD) %>%
+  dplyr::pull(response_id) %>%
+  unique()
+
+message("Clientes eliminados (gasto Adidas > $", SEVERE_THRESHOLD, "): ",
+        length(anomalous_ids_severe))
+
+if (length(anomalous_ids_severe) > 0) {
+  var_adidas         <- var_adidas         %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+  purchases_fashion2 <- purchases_fashion2 %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+  purchases_fashion  <- purchases_fashion  %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+  purchases_cat      <- purchases_cat      %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+  purchases0         <- purchases0         %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+}
+
+# Alinear var_adidas con la cohorte Adidas (compradores en T1)
+var_adidas <- var_adidas %>%
+  dplyr::semi_join(rfm_raw_adidas, by = "response_id")
+
+message("var_adidas final (cohorte T1): ", nrow(var_adidas), " clientes")
+```
+
+> **Output esperado:** Dos mensajes: número de clientes eliminados por outlier severo (probablemente muy pocos o ninguno dado el umbral alto) y tamaño final de `var_adidas`. Si se eliminaron clientes, el mensaje los reporta; si no, la primera línea dirá "0 clientes eliminados".
+
+---
+
+# Bloque 11 — Merge RFM + Y cruda
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque une las variables RFM de Adidas (T1) con la variable de respuesta cruda (T2) para crear el universo analítico base. Es un paso de integración que no modifica ningún valor: simplemente conecta los dos dataframes mediante el identificador del cliente.
+
+El uso de `left_join` desde `rfm_raw_adidas` garantiza que **todos los clientes con RFM en T1 estén representados**, aunque no hayan comprado Adidas en T2 (en cuyo caso `amount_adidas` será `NA` antes del `replace_na(0)`, que luego se convierte en 0). Esta es la implementación del principio "la cohorte se define por T1, no por T2": un cliente que compró Adidas en T1 pero no en T2 es parte del universo analítico con Y=0.
+
+El objeto `rfm_amount` que resulta de este bloque es la semilla de la cual se construirán todas las features adicionales (12m, brand flags, broadcat summary) en los bloques siguientes.
+
+## Términos nuevos o poco comunes
+
+- **`left_join()`**: Une dos dataframes conservando todas las filas del dataframe izquierdo. Si un `response_id` del izquierdo no aparece en el derecho, las columnas del derecho son `NA`. Aquí el izquierdo es `rfm_raw_adidas` y el derecho es `var_adidas`.
+- **`replace_na(list(amount_adidas = 0))`**: Versión para múltiples columnas de `tidyr::replace_na()`. Convierte `NA` en 0 en la columna `amount_adidas`. El `list()` permite especificar diferentes valores de reemplazo por columna.
+
+```{r bloque-11-merge-rfm-y}
+rfm_amount <- rfm_raw_adidas %>%
+  dplyr::left_join(var_adidas, by = "response_id") %>%
+  tidyr::replace_na(list(amount_adidas = 0))
+
+message("rfm_amount (base analítica): ", nrow(rfm_amount), " clientes")
+message("Con amount_adidas = 0 (no compraron Adidas en T2): ",
+        sum(rfm_amount$amount_adidas == 0))
+message("Con amount_adidas > 0 (compraron Adidas en T2): ",
+        sum(rfm_amount$amount_adidas > 0))
+```
+
+> **Output esperado:** Tres mensajes: tamaño total del universo analítico, número de clientes con Y=0 (no compraron Adidas en T2) y número con Y>0. La proporción de ceros es importante: si es muy alta (>90%), la componente logit del POGIT será dominante.
+
+---
+
+# Bloque 12 — Transacciones de moda en T2 (validación y brand_items)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque prepara las transacciones de moda en T2 que se usarán para dos propósitos: el cálculo del SoW empírico de Adidas en Amazon (validación, Bloque 13) y la construcción de variables de comportamiento multi-marca en T2.
+
+El `brand_count` captura la **diversidad de marca** del cliente en T2: cuántas marcas de moda distintas compró en Amazon en el período de evaluación. Un cliente que compra 5 marcas diferentes tiene un patrón de comportamiento muy diferente al que solo compra una, independientemente del gasto total.
+
+El `brand_items` construye variables de conteo de unidades por marca (formato ancho): una columna por cada marca de moda, indicando cuántas unidades de esa marca compró el cliente en T2. Estas variables (`2023_brand_Nike`, `2023_brand_Puma`, etc.) capturan la "firma de marca" del cliente y entrarán en la matriz W como señales de comportamiento competitivo.
+
+El `broadcat_summary` construye resúmenes de consumo por macro-categoría en T1: unidades y monto gastado en cada una de las 12 macro-categorías (moda, electrónica, hogar, etc.). Estas variables capturan el **perfil general de consumidor** más allá de la moda, que puede ser informativo sobre la capacidad de gasto total del cliente (covariable para λᵢ en W).
+
+## Términos nuevos o poco comunes
+
+- **`n_distinct(tech_brand)`**: En el código original era sobre marcas tecnológicas. Aquí es `fashion_brand`: cuenta marcas de moda únicas compradas en T2.
+- **`pivot_wider()` con `names_prefix`**: Añade un prefijo a los nombres de las nuevas columnas para identificar su origen temporal y temático (`2023_brand_Nike` indica: año 2023, variable de marca, marca Nike).
+- **`broadcat_summary`**: Resumen del consumo por macro-categoría en T1. La macro-categoría de moda (`Fashion_Sport`) es la más relevante, pero el consumo en otras categorías puede correlacionarse con el nivel de ingresos y la frecuencia de uso de Amazon.
+- **`mode_safe2()`**: Función local que calcula la moda (valor más frecuente) de un vector de texto. Se usa para determinar el estado de envío más frecuente del cliente. `tabulate(match(...))` es una forma eficiente de contar frecuencias sin ordenar.
+
+```{r bloque-12-transacciones-t2}
+purchases_fashion_period <- purchases_fashion2 %>%
+  dplyr::filter(dplyr::between(order_date, ref_date3, ref_date4))
+
+# [MOD-10] brand_count y brand_items sobre marcas de moda
+brand_count <- purchases_fashion_period %>%
+  dplyr::filter(!is.na(fashion_brand), fashion_brand != "") %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(`2023_n_brand` = dplyr::n_distinct(fashion_brand), .groups = "drop")
+
+brand_items <- purchases_fashion_period %>%
+  dplyr::filter(!is.na(fashion_brand), fashion_brand != "") %>%
+  dplyr::group_by(response_id, fashion_brand) %>%
+  dplyr::summarise(n_items = sum(quantity, na.rm = TRUE), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from   = fashion_brand,
+    values_from  = n_items,
+    values_fill  = list(n_items = 0),
+    names_prefix = "2023_brand_"
+  )
+
+# Integración con rfm_amount
+rfm_amount_2018_2023 <- rfm_amount %>%
+  dplyr::left_join(fashion_flags, by = "response_id") %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::starts_with("2018_Adidas_fashion_"),
+      ~ tidyr::replace_na(.x, 0)
+    )
+  )
+
+rfm_amount_2018_2023b <- rfm_amount_2018_2023 %>%
+  dplyr::left_join(brand_count, by = "response_id") %>%
+  dplyr::left_join(brand_items, by = "response_id") %>%
+  dplyr::mutate(
+    `2023_n_brand` = dplyr::coalesce(`2023_n_brand`, 0),
+    dplyr::across(dplyr::starts_with("2023_brand_"), ~ dplyr::coalesce(.x, 0))
+  )
+
+# broadcat_summary: consumo por macro-categoría en T1
+broadcat_summary <- purchases_fashion %>%
+  dplyr::filter(dplyr::between(order_date, ref_date1, ref_date2)) %>%
+  dplyr::group_by(response_id, broad_cat) %>%
+  dplyr::summarise(
+    units_cat  = sum(quantity, na.rm = TRUE),
+    amount_cat = sum(amount,   na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from  = broad_cat,
+    values_from = c(units_cat, amount_cat),
+    values_fill = list(units_cat = 0, amount_cat = 0),
+    names_glue  = "2018_{.value}_{broad_cat}"
+  )
+
+rfm_amount_2018_2023b <- rfm_amount_2018_2023b %>%
+  dplyr::left_join(broadcat_summary, by = "response_id") %>%
+  dplyr::mutate(
+    dplyr::across(dplyr::starts_with("2018_units_cat_"),  ~ dplyr::coalesce(.x, 0)),
+    dplyr::across(dplyr::starts_with("2018_amount_cat_"), ~ dplyr::coalesce(.x, 0))
+  )
+
+# Estado de envío más frecuente por cliente en T1
+mode_safe2 <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) return(NA_character_)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+state_summ <- purchases0 %>%
+  dplyr::filter(dplyr::between(order_date, ref_date1, ref_date2)) %>%
+  dplyr::mutate(
+    shipping_address_state = shipping_address_state %>%
+      stringr::str_trim() %>%
+      stringr::str_to_upper(),
+    shipping_address_state = dplyr::if_else(
+      is.na(shipping_address_state) | shipping_address_state == "",
+      "DIGITAL/LOCKER",
+      shipping_address_state
+    )
+  ) %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    n_states  = dplyr::n_distinct(
+      shipping_address_state[shipping_address_state != "DIGITAL/LOCKER"]
+    ),
+    top_state = mode_safe2(shipping_address_state),
+    .groups   = "drop"
+  )
+
+rfm_amount_2018_2023b <- rfm_amount_2018_2023b %>%
+  dplyr::left_join(state_summ, by = "response_id")
+
+message("rfm_amount_2018_2023b: ", nrow(rfm_amount_2018_2023b),
+        " clientes, ", ncol(rfm_amount_2018_2023b), " columnas")
+```
+
+> **Output esperado:** Un mensaje con el número de clientes y columnas de la tabla maestra `rfm_amount_2018_2023b`. El número de columnas será grande (60+) porque incluye RFM, fashion_flags, brand_items para cada competidor, broadcat_summary y state_summ.
+
+---
+
+# Bloque 13 — Integración con survey_enriched
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque integra el `survey_enriched` generado en el Script 1 con la tabla transaccional maestra (`rfm_amount_2018_2023b`). El resultado es `survey_enriched2`: un dataframe con una fila por cliente que combina todas sus características demográficas (del survey) con su historial de compras (de las transacciones Amazon).
+
+La lista `cols_drop` elimina columnas del survey que no son features del modelo: preguntas de control de atención, variables de incentivo y metadatos de la encuesta. Estas columnas son necesarias para la gestión de la encuesta pero no tienen valor predictivo para el SoW de Adidas. Es importante notar que `q_demos_race`, `q_life_changes` y `q_demos_state` también se eliminan aquí porque ya fueron **procesadas como dummies** en el Script 1 (las columnas `race_*` y `life_*` están en el survey_enriched).
+
+El filtro `valid_ids` restringe el survey a los clientes que tienen datos transaccionales de Adidas (compraron Adidas en T1), implementando el criterio de inclusión de la cohorte. Esto garantiza que el modelo solo se entrene y evalúe sobre clientes con historial de marca relevante.
+
+## Términos nuevos o poco comunes
+
+- **`survey_enriched`**: Objeto generado al final del Script 1 que contiene el survey original más las dummies de raza y cambios de vida. Debe estar cargado en la sesión de R para que este bloque funcione.
+- **`cols_drop`**: Vector de nombres de columnas que se eliminan del survey antes de la modelación. Incluye variables de gestión de la encuesta (duración, incentivos, verificaciones de atención) que son metadatos, no características del respondente.
+- **`distinct(response_id, .keep_all = TRUE)`**: Elimina duplicados de response_id conservando la primera ocurrencia de todas las columnas. Garantiza una fila por cliente.
+- **`relationship = "one-to-one"`**: Argumento de `left_join()` que verifica explícitamente que la unión sea 1:1 (un response_id del izquierdo coincide con a lo sumo un response_id del derecho). Si hay duplicados, R lanza un error informativo.
+
+```{r bloque-13-survey-enriched2}
+cols_drop <- c(
+  "duration_in_seconds","q_prolific_mturk","q_control","q_altruism",
+  "q_bonus_05","q_bonus_20","q_bonus_50",
+  "q_data_value_100","q_data_value_any","q_data_value_any_1_text",
+  "q_sell_your_data","q_sell_consumer_data","q_small_biz_use","q_census_use",
+  "q_research_society","q_attn_check","showdata","incentive","connect",
+  "q_demos_race","q_life_changes","q_demos_state","recorded_date"
+)
+
+valid_ids <- rfm_amount_2018_2023b %>%
+  dplyr::select(response_id) %>%
+  dplyr::distinct()
+
+survey_enriched2 <- survey_enriched %>%
+  dplyr::distinct(response_id, .keep_all = TRUE) %>%
+  dplyr::semi_join(valid_ids, by = "response_id") %>%
+  dplyr::left_join(rfm_amount_2018_2023b, by = "response_id",
+                   relationship = "one-to-one") %>%
+  dplyr::select(-dplyr::any_of(cols_drop))
+
+message("survey_enriched2: ", nrow(survey_enriched2), " clientes, ",
+        ncol(survey_enriched2), " columnas")
+```
+
+> **Output esperado:** Mensaje con el número de clientes y columnas de `survey_enriched2`. El número de clientes debe coincidir con el de `rfm_amount_2018_2023b`. Si hay una discrepancia, significa que algunos clientes de la cohorte Adidas no tienen datos en el survey (posible si usaron Prolific sin completar la encuesta).
+
+---
+
+# Bloque 14 — Dummies del survey (V/W base)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque aplica **one-hot encoding** a las variables categóricas del survey que entrarán al modelo como covariables. El paquete `fastDummies::dummy_cols()` convierte cada variable categórica en un conjunto de columnas binarias (0/1), eliminando la categoría de referencia para evitar multicolinealidad perfecta.
+
+Las dos variables con nivel de referencia explícito son:
+- `q_demos_age`: la referencia es el grupo más joven (`"18 - 24 years"`), de modo que todos los coeficientes representan el efecto diferencial de cada grupo mayor respecto a los jóvenes adultos.
+- `q_amazon_use_howmany`: la referencia es el uso individual (`"1 (just me!)"`), de modo que los coeficientes capturan el efecto de compartir la cuenta con más personas.
+
+El `mutate(across(where(is.numeric), ~ replace_na(.x, 0)))` al final convierte todos los `NA` restantes en ceros. Esto es correcto para variables transaccionales (un `NA` en una variable de gasto significa que el cliente no realizó ese tipo de compra = 0), pero debe aplicarse con cuidado en variables de survey (donde `NA` podría indicar pregunta no respondida). El `ignore_na = TRUE` en `dummy_cols()` maneja esto: los `NA` en variables categóricas producen 0 en todas sus dummies (tratamiento conservador).
+
+## Términos nuevos o poco comunes
+
+- **One-hot encoding**: Proceso de convertir una variable categórica con k niveles en k-1 columnas binarias (se elimina la categoría de referencia). Estándar en modelación de regresión para evitar la "trampa de la variable dummy" (multicolinealidad perfecta).
+- **Categoría de referencia**: Nivel de una variable categórica que se omite en las dummies. Los coeficientes de las otras dummies se interpretan como efectos diferenciales *respecto a* esa categoría.
+- **`remove_first_dummy = TRUE`**: Argumento de `dummy_cols()` que elimina la primera categoría del factor (la de referencia). Requiere que las variables estén definidas como `factor` con los niveles en el orden correcto.
+- **`remove_selected_columns = TRUE`**: Elimina la columna original (categórica) después de crear las dummies. Evita tener tanto la variable original como sus dummies en el mismo dataframe.
+- **`ignore_na = TRUE`**: Los `NA` en la variable original no generan una dummy adicional; todas las dummies para esa observación son 0.
+- **Multicolinealidad perfecta**: Situación donde una columna de la matriz de diseño es combinación lineal exacta de otras. Impide la estimación del modelo por MLE porque la matriz $(X^TX)$ es singular y no invertible.
+
+```{r bloque-14-dummies}
+# Nivel de referencia para edad: grupo más joven
+survey_enriched2$q_demos_age <- factor(
+  as.character(survey_enriched2$q_demos_age),
+  levels = c(
+    "18 - 24 years", "25 - 34 years", "35 - 44 years",
+    "45 - 54 years", "55 - 64 years", "65 and older"
+  )
+)
+
+# Nivel de referencia para uso compartido: uso individual
+survey_enriched2$q_amazon_use_howmany <- factor(
+  as.character(survey_enriched2$q_amazon_use_howmany),
+  levels = c("1 (just me!)", "2", "3", "4+")
+)
+
+data_dum <- survey_enriched2 %>%
+  fastDummies::dummy_cols(
+    select_columns = c(
+      "q_amazon_use_how_oft",
+      "q_demos_age",
+      "q_demos_hispanic",
+      "q_demos_education",
+      "q_demos_income",
+      "q_demos_gender",
+      "q_sexual_orientation",
+      "q_substance_use_1",
+      "q_substance_use_2",
+      "q_substance_use_3",
+      "q_personal_1",
+      "q_personal_2",
+      "q_amazon_use_howmany",
+      "q_amazon_use_hh_size"
+    ),
+    remove_first_dummy      = TRUE,
+    remove_selected_columns = TRUE,
+    ignore_na               = TRUE
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(where(is.numeric), ~ tidyr::replace_na(.x, 0))
+  )
+
+message("data_dum: ", nrow(data_dum), " clientes, ", ncol(data_dum), " columnas totales")
+```
+
+> **Output esperado:** Mensaje con el número de clientes y columnas de `data_dum`. El número de columnas será significativamente mayor al de `survey_enriched2` por las nuevas dummies. El incremento de columnas es aproximadamente la suma de (niveles - 1) de cada variable categorizada.
+
+---
+
+# Bloque 15 — W_pre: variables transaccionales + features de 12 meses
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque construye la **matriz W** (covariables del componente de intensidad SioW del modelo POGIT). W contiene las variables que explican *cuánto* gasta un cliente en moda/Adidas, condicionado a ser comprador: es la entrada al componente $\log(\lambda_i)$ del modelo.
+
+W se construye en dos capas: la **capa RFM** (3 variables) y la **capa de features de 12 meses** (25 variables adicionales). Las variables de 12 meses se calculan sobre una grilla mensual completa de los últimos 12 meses de T1, garantizando que todos los meses estén representados para todos los clientes (con 0 en meses sin compras). Esto evita un sesgo común: si un cliente solo compró 2 de 12 meses, su promedio sobre esos 2 meses sería muy diferente a su promedio sobre los 12.
+
+Las features de estacionalidad (`dollar_spring_avg_12m`, `dollar_summer_avg_12m`, etc.) capturan los patrones de compra por temporada, relevantes en moda porque hay compras estacionales claras (temporada de verano, vuelta al cole, Black Friday/Navidad). Las features `top-k` (`dollar_top1_12m`, `dollar_top3_avg_12m`) capturan el gasto pico del cliente, que es un predictor fuerte del gasto futuro: clientes con alto gasto pico tienden a tener mayor capacidad de gasto total.
+
+Los **ratios avg/topk** (`dollar_avg12_top1_ratio`) miden la consistencia del comportamiento: un ratio cercano a 1 indica que el cliente gasta montos similares cada mes; un ratio bajo indica que tiene uno o dos meses de gasto muy alto y el resto muy bajo. Esta "regularidad" es una señal de lealtad distinta a la magnitud del gasto.
+
+## Términos nuevos o poco comunes
+
+- **Grilla mensual (`grid_12`)**: Dataframe con todas las combinaciones de (cliente, mes) en los últimos 12 meses de T1. Se construye con `expand_grid()` y se une con las compras reales; donde no hay compras, el gasto es 0. Garantiza que el cómputo de promedios y desviaciones estándar use los 12 meses completos como denominador.
+- **`expand_grid()`**: Genera todas las combinaciones posibles de dos o más vectores. Similar a `merge(all = TRUE)` pero más eficiente y legible.
+- **`floor_date(date, "month")`**: Redondea una fecha al primer día del mes. Se usa para agrupar transacciones por mes.
+- **`%m-% months(11)`**: Operador de lubridate que resta 11 meses a una fecha, manejando correctamente los días finales de mes (ej: 31 de enero - 1 mes = 28/29 de febrero, no 3 de marzo).
+- **`safe_div()`**: División segura que devuelve 0 cuando el denominador es 0, evitando `NaN` (Not a Number) en los ratios que resultarían de 0/0.
+- **`topk_avg()`**: Promedio de los k valores más altos de un vector. Implementa la función de "pico de gasto" descrita en el paper.
+- **`%in% c(3,4,5)`**: Verifica si el número de mes pertenece al vector de primavera (marzo, abril, mayo). Análogo para verano (6,7,8), otoño (9,10,11) e invierno (12,1,2).
+
+```{r bloque-15-wmatriz-features}
+W_pre <- data_dum %>%
+  dplyr::select(
+    response_id,
+    recency_days_adidas,
+    frequency_adidas,
+    monetary_adidas
+  ) %>%
+  dplyr::distinct(response_id, .keep_all = TRUE) %>%
+  dplyr::mutate(response_id = as.character(response_id))
+
+if (length(anomalous_ids_severe) > 0) {
+  W_pre <- W_pre %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+}
+
+ids_w <- unique(W_pre$response_id)
+
+# Grilla mensual de los últimos 12 meses de T1
+anchor_month <- lubridate::floor_date(ref_date2, "month")
+months_12    <- seq(anchor_month %m-% months(11), anchor_month, by = "month")
+
+adidas_monthly <- purchases_fashion2 %>%
+  dplyr::filter(
+    stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+    dplyr::between(order_date, ref_date1, ref_date2),
+    response_id %in% ids_w
+  ) %>%
+  dplyr::mutate(ym = lubridate::floor_date(order_date, "month")) %>%
+  dplyr::group_by(response_id, ym) %>%
+  dplyr::summarise(
+    dollar_m   = sum(total_price, na.rm = TRUE),
+    products_m = sum(quantity, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+grid_12 <- tidyr::expand_grid(response_id = ids_w, ym = months_12) %>%
+  dplyr::left_join(adidas_monthly, by = c("response_id", "ym")) %>%
+  dplyr::mutate(
+    dollar_m   = tidyr::replace_na(dollar_m, 0),
+    products_m = tidyr::replace_na(products_m, 0),
+    mnum       = lubridate::month(ym)
+  )
+
+safe_div <- function(num, den) ifelse(den == 0, 0, num / den)
+topk_avg <- function(x, k) mean(utils::head(sort(x, decreasing = TRUE), k))
+
+feat_12 <- grid_12 %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    dollar_avg_12m   = mean(dollar_m),
+    products_avg_12m = mean(products_m),
+    dollar_std_12m   = stats::sd(dollar_m),
+    products_std_12m = stats::sd(products_m),
+    
+    dollar_top1_12m     = max(dollar_m),
+    dollar_top3_avg_12m = topk_avg(dollar_m, 3),
+    dollar_top6_avg_12m = topk_avg(dollar_m, 6),
+    
+    products_top1_12m     = max(products_m),
+    products_top3_avg_12m = topk_avg(products_m, 3),
+    products_top6_avg_12m = topk_avg(products_m, 6),
+    
+    dollar_spring_avg_12m   = mean(dollar_m[mnum %in% c(3,4,5)]),
+    dollar_summer_avg_12m   = mean(dollar_m[mnum %in% c(6,7,8)]),
+    dollar_autumn_avg_12m   = mean(dollar_m[mnum %in% c(9,10,11)]),
+    dollar_winter_avg_12m   = mean(dollar_m[mnum %in% c(12,1,2)]),
+    
+    products_spring_avg_12m = mean(products_m[mnum %in% c(3,4,5)]),
+    products_summer_avg_12m = mean(products_m[mnum %in% c(6,7,8)]),
+    products_autumn_avg_12m = mean(products_m[mnum %in% c(9,10,11)]),
+    products_winter_avg_12m = mean(products_m[mnum %in% c(12,1,2)]),
+    
+    months_with_purchase_12m = sum(products_m > 0),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    dollar_std_12m   = tidyr::replace_na(dollar_std_12m, 0),
+    products_std_12m = tidyr::replace_na(products_std_12m, 0)
+  )
+
+feat_ratios_12 <- feat_12 %>%
+  dplyr::transmute(
+    response_id,
+    dollar_avg12_top1_ratio   = safe_div(dollar_avg_12m,   dollar_top1_12m),
+    dollar_avg12_top3_ratio   = safe_div(dollar_avg_12m,   dollar_top3_avg_12m),
+    dollar_avg12_top6_ratio   = safe_div(dollar_avg_12m,   dollar_top6_avg_12m),
+    products_avg12_top1_ratio = safe_div(products_avg_12m, products_top1_12m),
+    products_avg12_top3_ratio = safe_div(products_avg_12m, products_top3_avg_12m),
+    products_avg12_top6_ratio = safe_div(products_avg_12m, products_top6_avg_12m)
+  )
+
+adidas_feats_12 <- feat_12 %>% dplyr::left_join(feat_ratios_12, by = "response_id")
+
+cols_new <- setdiff(names(adidas_feats_12), "response_id")
+W_pre <- W_pre %>%
+  dplyr::select(-dplyr::any_of(cols_new)) %>%
+  dplyr::left_join(adidas_feats_12, by = "response_id")
+
+message("W_pre: ", nrow(W_pre), " clientes, ", ncol(W_pre) - 1, " features (sin response_id)")
+```
+
+> **Output esperado:** Mensaje con el número de clientes y features de `W_pre`. Se esperan aproximadamente 28 features (3 RFM + 19 features 12m + 6 ratios).
+
+---
+
+# Bloque 16 — V_pre: variables de perfilado demográfico
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque construye la **matriz V** (covariables del componente de asignación SoW del modelo POGIT). V contiene las variables que explican la *preferencia* por Adidas ($\theta_i$): quién es el cliente (demografía, comportamiento en Amazon) más que qué tan intensamente compra.
+
+La selección de variables para V refleja la hipótesis teórica del modelo POGIT: los factores que determinan el **reparto del wallet entre marcas** son distintos de los que determinan el **volumen total de gasto**. Para Adidas, la teoría sugiere que la preferencia de marca se relaciona con características demográficas (edad, género, ingresos) y de estilo de vida, mientras que la intensidad del gasto se relaciona más con el historial de compra y la capacidad económica.
+
+Las variables incluidas en V son: dummies de raza, dummies de cambios de vida, dummies de grupo etario, dummies de ingreso, dummies de uso compartido de cuenta de Amazon, y `n_states` (número de estados de envío distintos, proxy de movilidad geográfica). Esta última es la única variable continua de V y se estandarizará (Z-score) con parámetros del TRAIN en el Bloque 18.
+
+## Términos nuevos o poco comunes
+
+- **Matriz V (covariables de asignación)**: En el modelo POGIT, la matriz que entra al componente logit: $\theta_i = \text{logit}^{-1}(V_i \beta)$. Cada fila es un cliente y cada columna es una covariable que afecta su preferencia por Adidas.
+- **Componente de asignación**: El modelo POGIT descompone el gasto en dos partes: (1) la fracción del gasto total asignada a Adidas ($\theta_i$, SoW) y (2) la intensidad total del gasto ($\lambda_i$, SioW). V explica (1).
+- **`starts_with()`**: Selector de columnas de dplyr que selecciona todas las columnas cuyo nombre comienza con el prefijo dado. Más conciso que listar todas las dummies individualmente.
+- **`n_states`**: Variable continua derivada del historial de envíos: número de estados distintos a los que el cliente recibió pedidos en T1. Proxy de movilidad geográfica y potencialmente de nivel socieconómico.
+
+```{r bloque-16-vmatriz}
+V_pre <- data_dum %>%
+  dplyr::select(
+    response_id,
+    dplyr::starts_with("race_"),
+    dplyr::starts_with("life_"),
+    dplyr::starts_with("q_demos_age_"),
+    dplyr::starts_with("q_demos_income_"),
+    dplyr::starts_with("q_amazon_use_howmany_"),
+    n_states
+  ) %>%
+  dplyr::distinct(response_id, .keep_all = TRUE) %>%
+  dplyr::mutate(response_id = as.character(response_id))
+
+if (length(anomalous_ids_severe) > 0) {
+  V_pre <- V_pre %>% dplyr::filter(!response_id %in% anomalous_ids_severe)
+}
+
+message("V_pre: ", nrow(V_pre), " clientes, ", ncol(V_pre) - 1, " features (sin response_id)")
+```
+
+> **Output esperado:** Mensaje con el número de clientes y features de `V_pre`. El número de features refleja las dummies de raza (~6), vida (~8), edad (~5), ingreso (~5), howmany (~3) más `n_states` = aproximadamente 28 features.
+
+---
+
+# Bloque 17 — Universo maestro y alineación V/W/Y
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque determina el **universo analítico final** como la intersección de los clientes presentes en V_pre y W_pre, y alinea los tres objetos (V, W, `var_adidas`) para que tengan exactamente los mismos clientes en el mismo orden.
+
+El orden maestro se toma de W_pre, siguiendo la convención del pipeline. El `var_adidas_full` se construye completando con 0s los clientes del universo que no tienen compras Adidas en T2 (los que no aparecerían en `var_adidas`): esto implementa el principio "la cohorte se define por T1" a nivel de los tres dataframes alineados.
+
+Los cinco `stopifnot()` finales son verificaciones críticas de integridad: comprueban que los tres dataframes tienen los mismos IDs en el mismo orden y que no hay `NA` en la variable de respuesta. Si alguna falla, el error detendrá la ejecución con un mensaje informativo, evitando que el pipeline continúe con datos desalineados.
+
+## Términos nuevos o poco comunes
+
+- **Universo analítico**: Conjunto de observaciones (clientes) incluidas en el análisis. Se define como la intersección de los IDs disponibles en todas las fuentes de datos necesarias.
+- **`intersect()`**: Devuelve los elementos comunes a dos vectores. `intersect(V_pre$response_id, W_pre$response_id)` son los clientes presentes en ambas matrices.
+- **`tibble(response_id = ids_master)`**: Crea un dataframe de una columna con todos los IDs del universo maestro. Se usa como "esqueleto" para el `left_join` que completará con los valores reales o ceros.
+- **`[match(ids_master, ...$response_id), ]`**: Reordena las filas de un dataframe según el orden del vector `ids_master`. `match()` devuelve las posiciones en el segundo vector de cada elemento del primero.
+
+```{r bloque-17-universo-maestro}
+ids_master <- intersect(V_pre$response_id, W_pre$response_id)
+stopifnot(length(ids_master) > 0)
+
+ids_master <- W_pre$response_id[W_pre$response_id %in% ids_master]
+
+var_adidas_full <- tibble::tibble(response_id = ids_master) %>%
+  dplyr::left_join(var_adidas, by = "response_id") %>%
+  dplyr::mutate(amount_adidas = tidyr::replace_na(amount_adidas, 0))
+
+V_full <- V_pre[match(ids_master, V_pre$response_id), , drop = FALSE]
+W_full <- W_pre[match(ids_master, W_pre$response_id), , drop = FALSE]
+
+stopifnot(identical(V_full$response_id, ids_master))
+stopifnot(identical(W_full$response_id, ids_master))
+stopifnot(identical(var_adidas_full$response_id, ids_master))
+stopifnot(!any(is.na(var_adidas_full$amount_adidas)))
+
+V_aligned       <- V_full
+W_aligned       <- W_full
+var_adidas_aligned <- var_adidas_full
+
+message("Universo analítico final: ", length(ids_master), " clientes")
+message("Con amount_adidas = 0: ", sum(var_adidas_aligned$amount_adidas == 0))
+message("Con amount_adidas > 0: ", sum(var_adidas_aligned$amount_adidas > 0))
+```
+
+> **Output esperado:** Tres mensajes con el tamaño del universo final y la distribución de ceros/positivos. Si algún `stopifnot()` falla, R mostrará un error con el mensaje "not all conditions are met"; verificar los steps previos de construcción de V_pre, W_pre y var_adidas.
+
+---
+
+# Bloque 18 — Split train/test 80/20 por cliente
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque divide el universo analítico en conjuntos de entrenamiento (80%) y prueba (20%) de manera aleatoria. La división se hace por **cliente** (no por transacción): cada cliente va completo al TRAIN o al TEST, nunca dividido. Esto es fundamental para la validez de la evaluación: si un cliente tuviera algunas transacciones en TRAIN y otras en TEST, el modelo podría usar información de ese cliente para predecir sus propias transacciones, sesgando el MAE de validación hacia abajo.
+
+`set.seed(123)` garantiza la reproducibilidad: el mismo split se obtiene siempre que se corra el script con esa semilla. El valor 123 es el mismo que el paper original para mantener comparabilidad metodológica entre el caso Apple y el caso Adidas.
+
+El proceso de split en dos pasos (primero `sample()` para obtener IDs, luego `match()` para obtener índices) garantiza que V, W y `var_adidas` queden perfectamente alineados después del split sin necesidad de re-join, que podría introducir desalineaciones si hay IDs duplicados o faltantes.
+
+## Términos nuevos o poco comunes
+
+- **Split train/test**: División del dataset en dos subconjuntos no solapados: TRAIN (para estimar el modelo) y TEST (para evaluar su desempeño en datos no vistos). La proporción 80/20 es estándar en machine learning y estudios de marketing cuantitativo.
+- **`set.seed()`**: Fija la semilla del generador de números pseudoaleatorios de R. Garantiza que `sample()` produzca siempre la misma secuencia, haciendo los resultados reproducibles.
+- **`sample(ids, size = floor(0.8*n), replace = FALSE)`**: Selecciona aleatoriamente el 80% de los IDs sin reemplazo (cada ID puede aparecer como máximo una vez en el TRAIN).
+- **`setdiff(ids, train_ids)`**: Diferencia de conjuntos: IDs que están en `ids` pero no en `train_ids`. Estos son los IDs del TEST.
+- **`floor(0.8*n)`**: Redondea hacia abajo al entero más cercano. Garantiza que el tamaño del TRAIN sea exactamente `floor(0.8*n)` clientes, sin fracciones.
+
+```{r bloque-18-split}
+set.seed(123)
+ids <- V_aligned$response_id
+n   <- length(ids)
+
+train_ids <- sample(ids, size = floor(0.8 * n), replace = FALSE)
+test_ids  <- setdiff(ids, train_ids)
+
+train_idx <- match(train_ids, ids)
+test_idx  <- match(test_ids,  ids)
+
+V_train <- V_aligned[train_idx, , drop = FALSE]
+V_test  <- V_aligned[test_idx,  , drop = FALSE]
+W_train <- W_aligned[train_idx, , drop = FALSE]
+W_test  <- W_aligned[test_idx,  , drop = FALSE]
+
+var_train <- var_adidas_aligned[train_idx, , drop = FALSE]
+var_test  <- var_adidas_aligned[test_idx,  , drop = FALSE]
+
+message("TRAIN: ", nrow(V_train), " clientes | TEST: ", nrow(V_test), " clientes")
+message("Proporción TRAIN: ", round(nrow(V_train)/n * 100, 1), "%")
+```
+
+> **Output esperado:** Dos mensajes con los tamaños del TRAIN y TEST y la proporción efectiva. Con n clientes y `floor(0.8*n)`, la proporción puede ser ligeramente diferente al 80% exacto por el redondeo.
+
+---
+
+# Bloque 19 — Winsorización post-split (caps solo con TRAIN)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque implementa la **segunda etapa del manejo de outliers** (Apéndice 7, Etapa 2), ahora sí aplicando la winsorización Tukey k=3 pero con la garantía de no data leakage: los caps se estiman exclusivamente en el conjunto de entrenamiento y se aplican mecánicamente al de prueba.
+
+El bloque se divide en tres sub-secciones correspondientes a los tres objetos que se winsorizan:
+
+**(a) Cap de Y (`amount_adidas`):** El umbral superior de la distribución de gasto Adidas en el TRAIN se calcula con Tukey k=3. Cualquier cliente TRAIN con gasto mayor al cap tiene su valor recortado al cap; los clientes TEST con valores por encima del mismo cap también son recortados al mismo límite. El cap se reporta para auditoría.
+
+**(b) Cap de W (variables transaccionales):** Todas las columnas numéricas de W_train se winsorizan simultáneamente con `winsorize_df_numeric_upper_trainonly()`. Los caps individuales por columna quedan en `W_wins$caps` para trazabilidad.
+
+**(c) Cap de n_states en V:** Solo la variable continua `n_states` se winsoriza en V. Las dummies binarias (0/1) no se afectan: por construcción, nunca pueden ser outliers ya que solo toman dos valores.
+
+## Términos nuevos o poco comunes
+
+- **No data leakage (aplicación)**: La garantía operacional es: ningún estadístico calculado sobre TEST se usa para transformar TRAIN o TEST. Los caps estimados en TRAIN son los únicos parámetros de transformación, y se aplican a TEST como constantes fijas.
+- **`round(cap_y_train, 4)`**: Redondea el cap a 4 decimales para el mensaje informativo. El cap real no se redondea; solo su visualización en el log.
+- **`tukey_cap_upper(var_train$amount_adidas, k=3)`**: Aplica la función definida en el Bloque 2 a la variable de respuesta del TRAIN. Devuelve la lista `tk_y_tr` con: `$x` (vector winsorizado), `$cap` (valor del umbral), `$q3` y `$iqr`.
+- **`if ("n_states" %in% names(V_train) && is.numeric(V_train$n_states))`**: Doble verificación: primero que la columna existe, luego que es numérica. Defensa ante el caso en que `n_states` haya sido eliminada en un paso previo.
+
+```{r bloque-19-winsor-post-split}
+# (a) Winsorización de Y sobre positivos únicamente.
+# Adidas tiene ~77% de ceros estructurales en amount_adidas (clientes que
+# compraron en T1 pero no en T2). Tukey sobre el vector completo produce
+# cap = $0 porque Q3 = 0, destruyendo todos los valores. La solución es
+# calcular el cap solo sobre los positivos y aplicarlo al vector completo
+# sin tocar los ceros.
+positivos_train <- var_train$amount_adidas[var_train$amount_adidas > 0]
+
+if (length(positivos_train) > 0) {
+  tk_y_tr     <- tukey_cap_upper(positivos_train, k = 3)
+  cap_y_train <- tk_y_tr$cap
+  message("Cap Tukey (k=3) TRAIN para amount_adidas (positivos): $",
+          round(cap_y_train, 2))
+  var_train$amount_adidas <- ifelse(
+    var_train$amount_adidas > cap_y_train, cap_y_train, var_train$amount_adidas
+  )
+  var_test$amount_adidas <- ifelse(
+    var_test$amount_adidas > cap_y_train, cap_y_train, var_test$amount_adidas
+  )
+} else {
+  cap_y_train <- Inf
+  message("Sin valores positivos en TRAIN — sin winsorización de Y")
+}
+
+# (b) Winsorización de W numéricas con caps de TRAIN
+W_wins <- winsorize_df_numeric_upper_trainonly(
+  df_train = W_train,
+  df_test  = W_test,
+  id_col = "response_id",
+  k = 3,
+  cols = NULL
+)
+W_train <- W_wins$train
+W_test  <- W_wins$test
+
+# (c) Winsorización de n_states en V con cap de TRAIN
+if ("n_states" %in% names(V_train) && is.numeric(V_train$n_states)) {
+  tk_ns_tr  <- tukey_cap_upper(V_train$n_states, k = 3)
+  cap_ns_train <- tk_ns_tr$cap
+  message("Cap Tukey (k=3) TRAIN para n_states: ", round(cap_ns_train, 2))
+  
+  V_train$n_states <- tk_ns_tr$x
+  V_test$n_states  <- apply_upper_cap(V_test$n_states, cap_ns_train)
+}
+
+message("Winsorización completada. Objetos actualizados: V_train, V_test, W_train, W_test, var_train, var_test")
+```
+
+> **Output esperado:** Tres mensajes: el cap para `amount_adidas`, el cap para `n_states` y la confirmación de finalización. Los caps dependen de la distribución real de los datos: el cap de `amount_adidas` debería estar en el rango de pocos cientos de dólares dado el perfil del gasto en Adidas.
+
+---
+
+# Bloque 20 — Construcción de Y (discretización con c solo en TRAIN)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque implementa la **Sección 5 del paper** (Construction of Response Variable): la transformación del gasto monetario continuo en una variable de conteos entera que pueda modelarse con una distribución discreta (Binomial o Poisson).
+
+La fórmula de discretización es $Y_i = \text{round}(amount_i / c)$, donde $c$ es una constante de escala estimada como el cociente entre la varianza y la media del gasto en TRAIN:
+
+$$c = \frac{\text{Var}(amount_{train})}{\text{Mean}(amount_{train})}$$
+
+Esta estimación de $c$ proviene del **método de momentos**: para una distribución de Poisson, $\text{Var}(Y) = E(Y) = \lambda$, y si $Y = amount/c$, entonces $c$ debe satisfacer que $\text{Var}(amount/c) \approx E(amount/c)$, lo que implica $c \approx \text{Var}(amount)/E(amount)$. Al dividir el gasto por $c$, se transforma la escala monetaria a una escala de "unidades normalizadas" compatible con la distribución Poisson.
+
+La constante $c$ se estima **exclusivamente en TRAIN** y se aplica sin modificación al TEST, implementando la regla de no data leakage para la variable de respuesta. El `pmax(0L, ...)` garantiza no-negatividad y el `as.integer(round(...))` convierte a enteros.
+
+## Términos nuevos o poco comunes
+
+- **Discretización**: Proceso de convertir una variable continua en una discreta (de valores enteros). Aquí es necesario porque el modelo POGIT asume una distribución de conteos para Y.
+- **Método de momentos**: Técnica de estimación que iguala los momentos teóricos de una distribución (media, varianza) con los momentos empíricos de los datos para estimar los parámetros. Alternativa más simple a la máxima verosimilitud para estimaciones de escala.
+- **Distribución de Poisson**: Distribución de probabilidad para conteos no negativos. Tiene la propiedad $E(Y) = \text{Var}(Y) = \lambda$. El modelo POGIT usa esta distribución para el componente de intensidad (SioW).
+- **`stats::var()`**: Calcula la varianza muestral (denominador $n-1$). Prefijo `stats::` para evitar conflictos con otras funciones llamadas `var` en el espacio de trabajo.
+- **`pmax(0L, ...)`**: Máximo paralelo con cero: para cada elemento, devuelve el máximo entre ese elemento y 0. Garantiza no-negatividad en casos borde donde el redondeo pudiera producir un entero negativo.
+- **`c_train`**: Nombre de la constante de escala en el código. Se usa minúscula para diferenciarla del concepto estadístico $c$ del paper, evitando confusión con la función base de R `c()`.
+
+```{r bloque-20-construccion-y}
+amt_train <- var_train$amount_adidas
+amt_test  <- var_test$amount_adidas
+
+# c_train se calcula sobre valores positivos únicamente.
+# Los ceros son estructurales (clientes que no compraron Adidas en T2)
+# y no deben entrar en la estimación de la escala de discretización.
+positivos_win <- amt_train[amt_train > 0]
+mean_train    <- mean(positivos_win, na.rm = TRUE)
+var_trainv    <- stats::var(positivos_win, na.rm = TRUE)
+c_train       <- round(var_trainv / mean_train, 0)
+
+if (!is.finite(c_train) || c_train <= 0) {
+  c_train <- max(1, round(mean_train, 0))
+  message("c_train ajustado a media de positivos: ", c_train)
+}
+
+Y_train <- pmax(0L, as.integer(round(amt_train / c_train, 0)))
+Y_test  <- pmax(0L, as.integer(round(amt_test  / c_train, 0)))
+
+message("c_train (Adidas): ", c_train)
+message("Split: TRAIN=", length(Y_train), " | TEST=", length(Y_test))
+message("Y_train — media: ", round(mean(Y_train), 3),
+        " | max: ", max(Y_train),
+        " | % ceros: ", round(mean(Y_train == 0) * 100, 1), "%")
+```
+
+> **Output esperado:** Tres mensajes: el valor de `c_train` (constante de escala en dólares), los tamaños de TRAIN y TEST, y estadísticas descriptivas de `Y_train` (media, máximo, porcentaje de ceros). Un porcentaje de ceros alto (>60%) es esperable dado que Adidas tiene menor penetración que Apple en el panel.
+
+---
+
+# Bloque 21 — Visualización de Y_train e Y_test
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-14 — CAMBIO ADIDAS:** Títulos y etiquetas en español; fuente serif/Times con
+> texto más grande; exportación a PDF en la carpeta compartida `Graficas_Addidas`.
+
+Este bloque visualiza la distribución de las variables Y_train e Y_test mediante gráficos de barras base R. Las visualizaciones permiten verificar que:
+
+1. La discretización produjo conteos razonables (no valores enteros demasiado grandes ni distribución degenera en todos ceros).
+2. La distribución del TRAIN y el TEST son similares (split balanceado en cuanto a la variable de respuesta).
+3. La distribución tiene la forma esperada: asimétrica positiva con un pico en 0, decayendo hacia valores mayores. Esto es consistente con una distribución de tipo Poisson o negativa-binomial, como asume el modelo POGIT.
+
+El uso de gráficos base R (en lugar de ggplot2) es una decisión deliberada del pipeline original: son más ligeros en memoria y más rápidos para distribuciones de conteos simples donde la estética de ggplot2 no añade valor analítico. La función `plot_bar_with_labels()` añade etiquetas de frecuencia encima de cada barra para facilitar la lectura de los valores absolutos.
+
+Los dos paneles (TRAIN y TEST) se exportan **juntos en un solo PDF**, porque el propósito de esta visualización es justamente compararlos lado a lado — separarlos en dos archivos rompería esa comparación visual directa.
+
+## Términos nuevos o poco comunes
+
+- **`par()`**: Función de R base que configura los parámetros gráficos globales del dispositivo activo (colores, fuentes, márgenes, etc.). `on.exit(par(op))` restaura la configuración original al salir de la función, evitando que los cambios persistan en gráficos posteriores.
+- **`par(family = "serif")`**: Fija la familia tipográfica del dispositivo gráfico activo. A diferencia de ggplot2 (donde la fuente se controla por capa), en gráficos base R se controla a nivel de dispositivo/función.
+- **`barplot(counts, ...)`**: Función base R para gráficos de barras. Devuelve las posiciones de las barras en el eje x (guardadas en `bp`), que luego se usan para posicionar las etiquetas con `text()`.
+- **`mtext()`**: Añade texto en los márgenes del gráfico (fuera del área de trazado). `side = 3` es el margen superior (título), `side = 1` es el inferior (eje x) y `side = 2` es el izquierdo (eje y).
+- **`table(vec)`**: Crea una tabla de frecuencias de un vector. Para Y_train (vector de enteros), devuelve cuántas veces aparece cada valor entero.
+- **`grDevices::cairo_pdf()`**: Dispositivo PDF que maneja mejor el *embedding* de fuentes y los caracteres acentuados del español, igual que en el Script 1.
+
+```{r bloque-21-visualizacion-y, fig.width=10, fig.height=5}
+# [MOD-14] Carpeta compartida de salida para todas las gráficas de Adidas
+# (la misma carpeta usada en el Script 1, reutilizada en el resto de
+# bloques de este script: 23, 24 y 25)
+dir_graficas <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Addidas"
+if (!dir.exists(dir_graficas)) dir.create(dir_graficas, recursive = TRUE)
+
+fill_grey   <- "grey85"
+border_grey <- "grey60"
+line_grey   <- "grey30"
+text_grey   <- "grey30"
+
+plot_bar_with_labels <- function(vec, main, col,
+                                 xlab = "Y", ylab = "Frecuencia",
+                                 border_col = border_grey,
+                                 text_col   = text_grey,
+                                 font_family = "serif") {
+  counts <- table(vec)
+  op <- par(family = font_family,
+            font=1, font.main=1, font.lab=1, font.axis=1,
+            col.axis=text_col, fg=border_col,
+            cex.main = 1.4, cex.lab = 1.2, cex.axis = 1.1)
+  on.exit(par(op))
+  
+  bp <- barplot(
+    counts, main="", xlab="", ylab="",
+    col=col, border=border_col,
+    ylim=c(0, max(counts) * 1.2)
+  )
+  text(bp, counts, labels=counts, pos=3, cex=0.9, col=text_col, family=font_family)
+  mtext(main, side=3, line=1.2, font=1, col=text_col, cex=1.4, family=font_family)
+  mtext(xlab, side=1, line=3,   font=1, col=text_col, cex=1.1, family=font_family)
+  mtext(ylab, side=2, line=3,   font=1, col=text_col, cex=1.1, family=font_family)
+}
+
+# [MOD-14] Exportación: ambos paneles juntos en un solo archivo, en español
+archivo_y <- file.path(dir_graficas, "21_distribucion_Y_train_test.pdf")
+grDevices::cairo_pdf(archivo_y, width = 10, height = 5)
+par(mfrow = c(1, 2))
+plot_bar_with_labels(Y_train, "Conjunto de entrenamiento \u2014 Y de Adidas", fill_grey,
+                      xlab = "Y (conteos Adidas)")
+plot_bar_with_labels(Y_test,  "Conjunto de prueba \u2014 Y de Adidas",       fill_grey,
+                      xlab = "Y (conteos Adidas)")
+par(mfrow = c(1, 1))
+grDevices::dev.off()
+message("Gr\u00e1fica guardada: ", archivo_y)
+
+# Impresión en pantalla para el documento HTML (vuelve a calcular el plot,
+# igual que se hizo en el Script 1 para pantalla vs. exportación)
+par(mfrow = c(1, 2))
+plot_bar_with_labels(Y_train, "Conjunto de entrenamiento \u2014 Y de Adidas", fill_grey,
+                      xlab = "Y (conteos Adidas)")
+plot_bar_with_labels(Y_test,  "Conjunto de prueba \u2014 Y de Adidas",       fill_grey,
+                      xlab = "Y (conteos Adidas)")
+par(mfrow = c(1, 1))
+```
+
+> **Output esperado:** Dos gráficos de barras lado a lado, uno para TRAIN y otro para TEST, en español y fuente serif, más el mensaje confirmando el PDF guardado en `Graficas_Addidas`. Ambos deben mostrar una distribución similar: pico pronunciado en Y=0 y barras decrecientes hacia la derecha. Si una de las distribuciones es muy diferente a la otra, puede indicar un problema en el split o en la construcción de Y.
+
+---
+
+# Bloque 22 — SoW empírico de Adidas en T2 (validación)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-13 — CAMBIO ADIDAS:** El archivo de salida se llama `empirical_sow_adidas.xlsx`.
+
+Este bloque construye el **SoW empírico observable** de Adidas en Amazon para el conjunto de prueba. Es un cálculo de validación que **no entra al modelo POGIT**: su único propósito es comparar la predicción del modelo ($\hat{\theta}_i$) con el SoW real observable en los datos.
+
+La fórmula del SoW empírico es:
+$$\text{SoW}_i^{Adidas} = \frac{\text{gasto Adidas en Amazon (T2)}}{\text{gasto total moda en Amazon (T2)}}$$
+
+Si el denominador es 0 (el cliente no compró moda en Amazon en T2), el SoW se define como 0. Este SoW mide la fracción del gasto de moda en Amazon que va a Adidas, que es el concepto que el modelo intenta predecir.
+
+El **SioW empírico** ($\text{siow}_i$) es el gasto total en moda en la escala de conteos: $\text{siow}_i = \text{round}((\text{gasto Adidas} + \text{gasto otros}) / c_{train})$. Esto permite comparar directamente las predicciones del componente de intensidad ($\hat{\lambda}_i$) con el SioW observado.
+
+El archivo `empirical_sow_adidas.xlsx` se exporta a `data/matrices/` para ser importado en el Script 3 (estimación del modelo).
+
+## Términos nuevos o poco comunes
+
+- **SoW empírico**: Medida observable del Share of Wallet calculada directamente de los datos de transacciones. Se opone al SoW "estimado" o "predicho" por el modelo. El modelo predice $\theta_i$; el SoW empírico es el benchmark con el que se compara.
+- **`reorder_by_ids()`**: Función local que reordena un dataframe según un vector de IDs de referencia, añadiendo filas vacías para los IDs faltantes. Garantiza que `apple_vs_others2` tenga exactamente una fila por cliente del test set, en el orden correcto.
+- **`if_else(siow == 0, 0, amount_adidas / amount_total)`**: Si el SioW es 0 (no hubo gasto de moda en Amazon en T2), el SoW se define como 0 para evitar división por cero. Esta convención es la misma del paper.
+- **MAE de validación**: El propósito de este SoW empírico es calcular el Mean Absolute Error (MAE) entre $\hat{\theta}_i$ y $\text{SoW}_i^{empírico}$ en el test set. Esto se hace en el Script 3.
+
+```{r bloque-22-sow-empirico}
+ids_sow_test <- Reduce(intersect, list(W_test$response_id, V_test$response_id))
+ids_sow_test <- sort(as.character(ids_sow_test))
+stopifnot(length(ids_sow_test) > 0)
+
+reorder_by_ids <- function(df, ids, id_col = "response_id", keep_all_ids = TRUE) {
+  stopifnot(id_col %in% names(df))
+  ids <- as.character(ids)
+  df[[id_col]] <- as.character(df[[id_col]])
+  
+  if (keep_all_ids) {
+    miss <- setdiff(ids, df[[id_col]])
+    if (length(miss) > 0) df <- dplyr::bind_rows(df, tibble::tibble(!!id_col := miss))
+  }
+  out <- df[match(ids, df[[id_col]]), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+period_df_sow <- purchases_fashion2 %>%
+  dplyr::filter(
+    dplyr::between(order_date, ref_date3, ref_date4),
+    response_id %in% ids_sow_test
+  )
+
+adidas_vs_others <- period_df_sow %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    amount_adidas_t2 = sum(
+      dplyr::if_else(
+        stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+        total_price, 0
+      ), na.rm = TRUE
+    ),
+    amount_others_t2 = sum(
+      dplyr::if_else(
+        !stringr::str_detect(title_lc, stringr::regex("\\badidas\\b", ignore_case = TRUE)),
+        total_price, 0
+      ), na.rm = TRUE
+    ),
+    n_total = sum(quantity, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::right_join(tibble::tibble(response_id = ids_sow_test), by = "response_id") %>%
+  dplyr::mutate(
+    amount_adidas_t2 = tidyr::replace_na(amount_adidas_t2, 0),
+    amount_others_t2 = tidyr::replace_na(amount_others_t2, 0),
+    n_total          = tidyr::replace_na(n_total, 0),
+    amount_total     = amount_adidas_t2 + amount_others_t2,
+    aux              = (amount_adidas_t2 + amount_others_t2) / c_train,
+    siow             = round(aux, 0),
+    sow              = dplyr::if_else(siow == 0, 0, amount_adidas_t2 / amount_total)
+  ) %>%
+  dplyr::select(response_id, amount_adidas_t2, amount_others_t2, siow, sow)
+
+adidas_vs_others2 <- reorder_by_ids(adidas_vs_others, ids_sow_test, keep_all_ids = TRUE)
+stopifnot(nrow(adidas_vs_others2) == length(ids_sow_test))
+
+T2.siow <- adidas_vs_others2$siow
+T2.sow  <- adidas_vs_others2$sow
+
+# [MOD-13] Export a empirical_sow_adidas.xlsx
+if (!dir.exists("data/matrices")) dir.create("data/matrices", recursive = TRUE)
+
+wb_sow <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_sow, "id")
+openxlsx::writeData(wb_sow, "id",   data.frame(response_id = adidas_vs_others2$response_id))
+openxlsx::addWorksheet(wb_sow, "sow")
+openxlsx::writeData(wb_sow, "sow",  data.frame(sow = adidas_vs_others2$sow))
+openxlsx::addWorksheet(wb_sow, "siow")
+openxlsx::writeData(wb_sow, "siow", data.frame(siow = adidas_vs_others2$siow))
+openxlsx::saveWorkbook(wb_sow, file = "data/matrices/empirical_sow_adidas.xlsx", overwrite = TRUE)
+
+message("empirical_sow_adidas.xlsx guardado. Clientes test: ", length(ids_sow_test))
+message("SoW empírico Adidas — media: ", round(mean(T2.sow), 3),
+        " | % con SoW=0: ", round(mean(T2.sow == 0) * 100, 1), "%")
+```
+
+> **Output esperado:** Dos mensajes: confirmación del archivo guardado y estadísticas del SoW empírico. La media del SoW Adidas en Amazon debería ser baja (Adidas es una marca con SoW típicamente menor al 20% del gasto total de moda en Amazon). Un alto porcentaje de SoW=0 es esperable.
+
+---
+
+# Bloque 23 — Gráficos del SoW empírico (3 paneles)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-14 — CAMBIO ADIDAS:** Títulos y etiquetas en español; tema `theme_clean_grey`
+> ahora incluye fuente serif/Times y `base_size = 16` (antes 12); los títulos se envuelven
+> automáticamente (`wrap_title()`) para evitar el mismo problema de recorte que vimos en
+> el Script 1; los tres paneles combinados se exportan a un solo PDF en `Graficas_Addidas`.
+
+Este bloque produce la visualización completa del SoW empírico de Adidas en tres paneles complementarios, usando ggplot2 con un tema minimalista en escala de grises. Los tres paneles son:
+
+**Panel 1 (`p_all`):** Histograma de densidad del SoW incluyendo todos los clientes del test, con líneas de media y mediana. Muestra la distribución bimodal típica: pico en 0 (clientes que no compraron Adidas en T2) y distribución dispersa para los que sí compraron.
+
+**Panel 2 (`p_counts`):** Gráfico de barras que cuantifica el número y proporción de clientes con SoW=0 vs SoW>0. Permite evaluar el nivel de "cero-inflación" en el test set, que determina la importancia relativa del componente logit del POGIT.
+
+**Panel 3 (`p_pos`):** Histograma de densidad del SoW solo para clientes con SoW>0. Muestra la distribución condicional positiva, que suele ser más plana o con forma de U, indicando alta variabilidad en la asignación de gasto entre quienes sí compran Adidas.
+
+La combinación de los tres paneles con `patchwork` produce una figura completa que el paper describe como la visualización de validación del SoW empírico. Se exportan **combinados en un solo PDF**, no por separado, porque están diseñados desde el origen para leerse como una sola figura compuesta.
+
+## Términos nuevos o poco comunes
+
+- **`theme_clean_grey`**: Objeto de tema ggplot2 definido localmente. Elimina el fondo gris por defecto, las líneas de cuadrícula y establece colores grises para todos los elementos, además de la fuente serif y el tamaño de texto. Es el estilo visual del paper, adaptado.
+- **`wrap_title()`**: Función local que envuelve un título largo en varias líneas con `stringr::str_wrap()`, para que nunca se recorte contra el borde del lienzo, sin importar el tamaño de fuente elegido.
+- **`after_stat(density)`**: Argumento estético de `geom_histogram()` que normaliza las alturas de las barras por la densidad en lugar de la frecuencia absoluta, permitiendo comparar histogramas con diferente número de observaciones.
+- **`pmin(pmax(sow, 0), 1)`**: Recorta el SoW al rango [0,1]. Aunque teóricamente el SoW siempre está en [0,1], pueden aparecer valores ligeramente fuera del rango por errores de redondeo numérico.
+- **`patchwork::plot_layout(heights = c(0.45, 0.25, 0.30))`**: Controla la altura relativa de cada panel en la figura compuesta. Los pesos suman 1 y determinan qué fracción de la altura total ocupa cada panel.
+- **`scales::percent()`**: Convierte un número decimal a cadena de texto porcentual con control de decimales. `accuracy = 0.1` muestra un decimal.
+
+```{r bloque-23-graficos-sow, fig.width=10, fig.height=12}
+# [MOD-14] theme_clean_grey ahora incluye fuente serif y texto más grande
+theme_clean_grey <- ggplot2::theme_minimal(base_size = 16) +
+  ggplot2::theme(
+    text             = ggplot2::element_text(family = "serif"),
+    panel.grid       = ggplot2::element_blank(),
+    panel.background = ggplot2::element_blank(),
+    plot.background  = ggplot2::element_blank(),
+    axis.line        = ggplot2::element_line(color = "grey60"),
+    axis.ticks       = ggplot2::element_line(color = "grey60"),
+    axis.text        = ggplot2::element_text(color = "grey20"),
+    axis.title       = ggplot2::element_text(color = "grey20"),
+    plot.title       = ggplot2::element_text(color = "grey20", lineheight = 1.05)
+  )
+
+# [MOD-14] Envoltura defensiva de títulos largos (misma lógica que el Script 1)
+wrap_title <- function(x, width = 40) stringr::str_wrap(x, width = width)
+
+df_sow <- adidas_vs_others2 %>%
+  dplyr::transmute(share = pmin(pmax(sow, 0), 1)) %>%
+  dplyr::filter(!is.na(share))
+
+m_all  <- mean(df_sow$share, na.rm = TRUE)
+md_all <- median(df_sow$share, na.rm = TRUE)
+dx     <- 0.02
+
+p_all <- ggplot2::ggplot(df_sow, ggplot2::aes(x = share)) +
+  ggplot2::geom_histogram(
+    ggplot2::aes(y = ggplot2::after_stat(density)),
+    binwidth = 0.01, boundary = 0, closed = "right",
+    fill = "grey85", color = "grey60"
+  ) +
+  ggplot2::geom_vline(xintercept = m_all,  linetype = "dashed", color = "grey30") +
+  ggplot2::geom_vline(xintercept = md_all, linetype = "dotted", color = "grey30") +
+  ggplot2::annotate("text", x = min(1, m_all + dx), y = Inf, vjust = 1.5, color = "grey20",
+    label = paste0("Media = ", scales::percent(m_all, accuracy = 0.1))) +
+  ggplot2::annotate("text", x = min(1, md_all + dx), y = Inf, vjust = 3.0, color = "grey20",
+    label = paste0("Mediana = ", scales::percent(md_all, accuracy = 0.1))) +
+  ggplot2::coord_cartesian(xlim = c(0, 1)) +
+  ggplot2::scale_x_continuous(labels = scales::percent) +
+  ggplot2::labs(
+    title = wrap_title("SoW de Adidas en Amazon en T2 \u2014 Test (incluye ceros)"),
+    x = "SoW de Adidas", y = "Densidad"
+  ) +
+  theme_clean_grey
+
+tot_n <- nrow(df_sow)
+counts_df <- df_sow %>%
+  dplyr::summarise(zeros = sum(share == 0), positives = sum(share > 0)) %>%
+  tidyr::pivot_longer(dplyr::everything(), names_to = "group", values_to = "n") %>%
+  dplyr::mutate(
+    pct   = n / tot_n,
+    group = dplyr::recode(group, zeros = "SoW = 0", positives = "SoW > 0")
+  ) %>%
+  dplyr::mutate(y_label = n + pmax(12, 0.06 * max(n)))
+
+p_counts <- ggplot2::ggplot(counts_df, ggplot2::aes(x = group, y = n)) +
+  ggplot2::geom_col(width = 0.6, fill = "grey85", color = "grey60") +
+  ggplot2::geom_text(
+    ggplot2::aes(y = y_label,
+      label = paste0(scales::comma(n), " (", scales::percent(pct, accuracy = 0.1), ")")),
+    color = "grey20", vjust = 0
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, max(counts_df$y_label) * 1.08),
+    expand = ggplot2::expansion(mult = c(0, 0))
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::labs(
+    title = wrap_title("SoW de Adidas en Amazon en T2 \u2014 Test: ceros vs. positivos"),
+    x = NULL, y = "Conteo"
+  ) +
+  theme_clean_grey +
+  ggplot2::theme(plot.margin = ggplot2::margin(5, 25, 5, 5))
+
+pos_sow <- df_sow %>% dplyr::filter(share > 0)
+m_pos   <- mean(pos_sow$share, na.rm = TRUE)
+md_pos  <- median(pos_sow$share, na.rm = TRUE)
+
+p_pos <- ggplot2::ggplot(pos_sow, ggplot2::aes(x = share)) +
+  ggplot2::geom_histogram(
+    ggplot2::aes(y = ggplot2::after_stat(density)),
+    binwidth = 0.02, boundary = 0, closed = "right",
+    fill = "grey85", color = "grey60"
+  ) +
+  ggplot2::geom_vline(xintercept = m_pos,  linetype = "dashed", color = "grey30") +
+  ggplot2::geom_vline(xintercept = md_pos, linetype = "dotted", color = "grey30") +
+  ggplot2::annotate("text", x = min(1, m_pos + dx), y = Inf, vjust = 1.5, color = "grey20",
+    label = paste0("Media = ", scales::percent(m_pos, accuracy = 0.1))) +
+  ggplot2::annotate("text", x = min(1, md_pos + dx), y = Inf, vjust = 3.0, color = "grey20",
+    label = paste0("Mediana = ", scales::percent(md_pos, accuracy = 0.1))) +
+  ggplot2::coord_cartesian(xlim = c(0, 1)) +
+  ggplot2::scale_x_continuous(labels = scales::percent) +
+  ggplot2::labs(
+    title = wrap_title("SoW de Adidas en Amazon en T2 \u2014 Test (solo positivos)"),
+    x = "SoW de Adidas", y = "Densidad"
+  ) +
+  theme_clean_grey
+
+print(p_all)
+print(p_counts)
+print(p_pos)
+
+p_sow_combinado <- (p_all / p_counts / p_pos) +
+  patchwork::plot_layout(heights = c(0.45, 0.25, 0.30))
+print(p_sow_combinado)
+
+# [MOD-14] Exportación: los tres paneles combinados en un solo archivo PDF
+archivo_sow <- file.path(dir_graficas, "23_sow_empirico_paneles.pdf")
+ggplot2::ggsave(
+  filename = archivo_sow,
+  plot     = p_sow_combinado,
+  width    = 8.5, height = 11, units = "in", dpi = 300,
+  device   = grDevices::cairo_pdf
+)
+message("Gr\u00e1fica guardada: ", archivo_sow)
+```
+
+> **Output esperado:** Los tres paneles del SoW empírico de Adidas renderizados en el documento, en español y fuente serif, más el mensaje del PDF combinado guardado en `Graficas_Addidas`. El primer panel muestra la distribución completa (con un pico muy pronunciado en 0 para Adidas), el segundo cuantifica la proporción de ceros, y el tercero muestra la distribución condicional positiva.
+
+---
+
+# Bloque 24 — Bubble plot: clientes por bins de SoW y quintiles de SioW
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-14 — CAMBIO ADIDAS:** Títulos, etiquetas y quintiles traducidos al español;
+> hereda la fuente serif y `base_size = 16` de `theme_clean_grey` (definido en el
+> Bloque 23); título envuelto con `wrap_title()`; exportación a PDF individual en
+> `Graficas_Addidas`.
+
+Este bloque produce la visualización cruzada del SoW empírico vs SioW empírico para el test set de Adidas. Cada burbuja representa un grupo de clientes con el mismo bin de SoW (intervalos de 0.2) y el mismo quintil de SioW. El tamaño de la burbuja codifica el número de clientes en ese grupo, y la etiqueta dentro de cada burbuja muestra el gasto promedio del grupo en dólares.
+
+La interpretación conecta directamente con los segmentos de clientes del paper:
+- **SoW alto + SioW alto**: Clientes leales a Adidas y con alto consumo total → los más valiosos.
+- **SoW alto + SioW bajo**: Clientes con preferencia por Adidas pero consumo total bajo → potencial limitado.
+- **SoW bajo + SioW alto**: Alto consumo en moda pero repartido entre marcas → mayor oportunidad de captación para Adidas.
+- **SoW bajo + SioW bajo**: Clientes de bajo valor en el segmento moda.
+
+Este gráfico permite al directivo de marketing de Adidas identificar en qué segmento concentrar esfuerzos de retención vs. captación, conectando las predicciones del modelo con decisiones de negocio.
+
+## Términos nuevos o poco comunes
+
+- **`ntile(tw, 5)`**: Divide el vector `tw` en 5 grupos de igual tamaño (quintiles). El grupo 1 tiene los valores más bajos y el 5 los más altos.
+- **`cut(sow, breaks = breaks_sow, ...)`**: Discretiza la variable continua `sow` en intervalos definidos por `breaks_sow`. `include.lowest = TRUE` incluye el valor mínimo en el primer bin. `labels` asigna etiquetas a cada bin.
+- **Burbujas (`geom_point` con `size`)**: Representación gráfica donde el tamaño del punto codifica una tercera dimensión (aquí, el número de clientes en el grupo). Es una alternativa visual a tablas de frecuencia cruzada.
+- **`scale_size_manual()`**: Asigna tamaños específicos (en unidades de área del punto) a cada categoría del tamaño. Los valores `c(11, 15, 19, 23, 27)` producen burbujas progresivamente más grandes para los cinco rangos de conteo.
+- **`guide_legend(override.aes = ...)`**: Controla la apariencia de los puntos en la leyenda, independientemente de cómo se visualizan en el gráfico.
+
+```{r bloque-24-bubble-plot, fig.width=10, fig.height=7}
+breaks_sow <- c(0, .2, .4, .6, .8, 1)
+labs_sow   <- c("[0, .2]", "(.2, .4]", "(.4, .6]", "(.6, .8]", "(.8, 1]")
+
+plot_df <- adidas_vs_others2 %>%
+  dplyr::transmute(
+    sow = pmin(pmax(sow, 0), 1),
+    tw  = siow
+  ) %>%
+  dplyr::mutate(
+    sow_bin = cut(sow, breaks = breaks_sow, include.lowest = TRUE,
+                  right = TRUE, labels = labs_sow),
+    tw_q = dplyr::ntile(tw, 5)
+  ) %>%
+  dplyr::filter(!is.na(sow_bin)) %>%
+  dplyr::group_by(tw_q, sow_bin) %>%
+  dplyr::summarise(
+    n       = dplyr::n(),
+    avg_usd = mean(tw, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    # [MOD-14] Quintiles traducidos al espa\u00f1ol
+    tw_lab = factor(
+      dplyr::case_when(
+        tw_q == 1 ~ "Quintil inferior",
+        tw_q == 2 ~ "2do quintil",
+        tw_q == 3 ~ "3er quintil",
+        tw_q == 4 ~ "4to quintil",
+        tw_q == 5 ~ "Quintil superior"
+      ),
+      levels = c("Quintil superior","4to quintil","3er quintil","2do quintil","Quintil inferior")
+    ),
+    sow_lab   = factor(sow_bin, levels = labs_sow),
+    label_txt = scales::dollar(avg_usd, accuracy = 0.01),
+    n_bin = cut(n,
+      breaks = c(-Inf, 5, 10, 20, 70, Inf),
+      labels = c("\u22645","6\u201310","11\u201320","21\u201370",">70"),
+      right  = TRUE
+    )
+  )
+
+# [MOD-14] "Small"/"Large" traducidos
+x_labs <- labs_sow
+x_labs[1] <- paste0("Bajo\n", x_labs[1])
+x_labs[length(x_labs)] <- paste0("Alto\n", x_labs[length(x_labs)])
+
+p_bubble <- ggplot2::ggplot(plot_df, ggplot2::aes(x = sow_lab, y = tw_lab)) +
+  ggplot2::geom_point(
+    ggplot2::aes(size = n_bin),
+    shape = 21, fill = "grey85", color = "grey60", stroke = 0.6
+  ) +
+  ggplot2::geom_text(ggplot2::aes(label = label_txt), size = 3.5, color = "grey20",
+                      family = "serif") +
+  ggplot2::scale_size_manual(
+    name   = "Conteo",
+    values = c(11, 15, 19, 23, 27),
+    breaks = c("\u22645","6\u201310","11\u201320","21\u201370",">70"),
+    guide  = ggplot2::guide_legend(
+      override.aes = list(shape=21, fill="grey85", color="grey60")
+    )
+  ) +
+  ggplot2::scale_x_discrete(
+    labels = x_labs,
+    expand = ggplot2::expansion(add = c(0.35, 0.15))
+  ) +
+  ggplot2::scale_y_discrete(limits = rev(levels(plot_df$tw_lab))) +
+  ggplot2::labs(
+    title = wrap_title("Clientes Adidas por SoW (bins) y SioW (quintiles) \u2014 Test"),
+    x = "SoW de Adidas, bins de ancho 0.2",
+    y = "SioW (moda total), quintiles"
+  ) +
+  ggplot2::coord_cartesian(clip = "off") +
+  theme_clean_grey +
+  ggplot2::theme(
+    plot.title  = ggplot2::element_text(margin = ggplot2::margin(b = 8)),
+    plot.margin = ggplot2::margin(t=10, r=10, b=16, l=10)
+  )
+
+print(p_bubble)
+
+# [MOD-14] Exportación a PDF individual
+archivo_bubble <- file.path(dir_graficas, "24_bubble_sow_siow.pdf")
+ggplot2::ggsave(
+  filename = archivo_bubble,
+  plot     = p_bubble,
+  width    = 9, height = 7, units = "in", dpi = 300,
+  device   = grDevices::cairo_pdf
+)
+message("Gr\u00e1fica guardada: ", archivo_bubble)
+```
+
+> **Output esperado:** Un gráfico de burbujas con 5 filas (quintiles SioW) × 5 columnas (bins SoW), en español y fuente serif, más el mensaje del PDF guardado en `Graficas_Addidas`. Las burbujas más grandes estarán donde hay más clientes (probablemente en el bin [0, .2] para Adidas, dado su SoW típicamente bajo). Las etiquetas muestran el gasto promedio en dólares por grupo.
+
+---
+
+# Bloque 25 — Firmas de marca: clientes Adidas del test set
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-14 — CAMBIO ADIDAS:** Títulos y etiquetas en español; fuente serif/Times;
+> título de cada panel envuelto con `str_wrap()` (la firma de marca puede ser larga si
+> el cliente compró muchas marcas distintas); el PDF se renombra y se mueve a la carpeta
+> compartida `Graficas_Addidas`, usando `cairo_pdf` en vez del dispositivo `pdf()` base.
+> **Se mantiene como un solo PDF multi-página** — a diferencia de los demás bloques de
+> este script, el número de paneles aquí depende de los datos (cuántas combinaciones de
+> marca existan), así que no tiene sentido tratarlo como figuras individuales de tesis;
+> es un documento exploratorio para el apéndice.
+
+Este bloque realiza un análisis exploratorio de **co-compras de marca** para los clientes del test set que compraron Adidas en T2. Permite responder: ¿qué otras marcas de moda compran los clientes de Adidas? ¿Son sus clientes también compradores de Nike? ¿O de marcas más nicho?
+
+El concepto de **firma de marca** es la concatenación de todas las marcas no-Adidas que compró el cliente en T2. Por ejemplo, un cliente que compró Nike y Puma además de Adidas tiene la firma "Nike + Puma". Los clientes con la misma firma se agrupan y se visualizan juntos en paneles de hasta 3 clientes.
+
+Esta visualización es principalmente cualitativa y exploratoria: no entra directamente al modelo POGIT, pero proporciona insights de negocio sobre el ecosistema competitivo de Adidas que son difíciles de capturar con estadísticas agregadas. También sirve para validar que el diccionario de marcas (`brand_dict`) está funcionando correctamente.
+
+## Términos nuevos o poco comunes
+
+- **Firma de marca**: Conjunto de marcas que compró un cliente, expresado como cadena de texto. Es una representación compacta del comportamiento multi-marca del cliente.
+- **`facet_wrap(~ response_id)`**: Divide el gráfico en subpaneles, uno por `response_id`. Permite comparar el perfil de compra de múltiples clientes lado a lado con la misma escala.
+- **`coord_flip()`**: Invierte los ejes X e Y. Se usa para gráficos de barras horizontales, que son más legibles cuando las etiquetas del eje son largas (nombres de marcas).
+- **`rowwise()`**: Activa el modo fila por fila de `dplyr`. Permite aplicar operaciones que son difíciles de vectorizar, como `sum(c_across(...))` que suma los valores de múltiples columnas dentro de cada fila.
+- **`split(ids_sig, ceiling(seq_along(ids_sig)/3))`**: Divide un vector de IDs en grupos de 3. `seq_along()` genera la secuencia 1, 2, 3, ...; dividida por 3 y redondeada hacia arriba con `ceiling()` produce el índice del grupo.
+
+```{r bloque-25-firmas-marca, fig.width=12, fig.height=6}
+ids_w_train <- W_aligned$response_id[train_idx]
+ids_w_test  <- W_aligned$response_id[test_idx]
+
+brand_cols <- grep("^2023_brand_", names(survey_enriched2), value = TRUE)
+
+data1_marcas_2023 <- survey_enriched2 %>%
+  dplyr::select(response_id, dplyr::all_of(brand_cols)) %>%
+  dplyr::filter(response_id %in% ids_w_test)
+
+# Clientes que compraron Adidas en T2 (usando variable Y del test)
+adidas_buyers_test <- var_test %>%
+  dplyr::filter(amount_adidas > 0) %>%
+  dplyr::pull(response_id)
+
+ids_interes <- intersect(data1_marcas_2023$response_id, adidas_buyers_test)
+
+df_counts <- survey_enriched2 %>%
+  dplyr::select(response_id, dplyr::all_of(brand_cols)) %>%
+  dplyr::mutate(
+    dplyr::across(dplyr::all_of(brand_cols), ~ tidyr::replace_na(as.numeric(.x), 0))
+  ) %>%
+  dplyr::mutate(total_units = rowSums(dplyr::across(dplyr::all_of(brand_cols)), na.rm = TRUE))
+
+df_long <- df_counts %>%
+  tidyr::pivot_longer(cols = dplyr::all_of(brand_cols),
+                      names_to = "brand", values_to = "units") %>%
+  dplyr::mutate(
+    brand      = gsub("^2023_brand_", "", brand),
+    proportion = dplyr::if_else(total_units > 0, units / total_units, 0)
+  ) %>%
+  dplyr::filter(response_id %in% ids_interes, units > 0)
+
+sig_tbl <- df_long %>%
+  dplyr::filter(brand != "Adidas") %>%
+  dplyr::group_by(response_id) %>%
+  dplyr::summarise(
+    signature = {
+      br <- sort(unique(brand[units > 0]))
+      if (length(br) == 0) "NONE" else paste(br, collapse = " + ")
+    },
+    .groups = "drop"
+  )
+
+df_long <- df_long %>%
+  dplyr::left_join(sig_tbl, by = "response_id") %>%
+  dplyr::filter(!is.na(signature), signature != "NONE")
+
+users_by_sig <- df_long %>%
+  dplyr::distinct(response_id, signature) %>%
+  dplyr::arrange(signature, response_id)
+
+panel_groups <- list()
+for (sig in unique(users_by_sig$signature)) {
+  ids_sig <- users_by_sig %>% dplyr::filter(signature == sig) %>% dplyr::pull(response_id)
+  if (length(ids_sig) == 0) next
+  chunks <- split(ids_sig, ceiling(seq_along(ids_sig) / 3))
+  for (ch in chunks) {
+    panel_groups <- append(panel_groups, list(list(ids = ch, signature = sig)))
+  }
+}
+
+# [MOD-14] Títulos y etiquetas en español, fuente serif, título envuelto
+plots_firmas <- lapply(seq_along(panel_groups), function(i) {
+  meta    <- panel_groups[[i]]
+  df_plot <- df_long %>% dplyr::filter(response_id %in% meta$ids, units > 0)
+  if (nrow(df_plot) == 0) return(NULL)
+  
+  ggplot2::ggplot(
+    df_plot,
+    ggplot2::aes(x = reorder(brand, -proportion), y = proportion, fill = brand)
+  ) +
+    ggplot2::geom_col(width = 0.4) +
+    ggplot2::geom_text(
+      ggplot2::aes(label = paste0(scales::percent(proportion, accuracy = 1),
+                                  " (", units, ")")),
+      hjust = -0.1, size = 3.2, family = "serif"
+    ) +
+    ggplot2::facet_wrap(~ response_id, scales = "free_x", nrow = 1) +
+    ggplot2::coord_flip(clip = "off") +
+    ggplot2::labs(
+      title = stringr::str_wrap(
+        paste0("Clientes agrupados por el mismo conjunto de marcas no-Adidas: ", meta$signature),
+        width = 55
+      ),
+      x = "Marca", y = "Proporci\u00f3n de compra", fill = "Marca"
+    ) +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      text             = ggplot2::element_text(family = "serif"),
+      panel.spacing    = ggplot2::unit(2, "lines"),
+      plot.margin      = ggplot2::margin(5, 40, 5, 5),
+      legend.position  = "bottom",
+      panel.grid.major = ggplot2::element_blank(),
+      panel.grid.minor = ggplot2::element_blank()
+    )
+})
+
+# Renderiza en el documento los primeros 3 paneles (para no sobrecargar el HTML)
+for (i in seq_len(min(3, length(plots_firmas)))) {
+  if (!is.null(plots_firmas[[i]])) print(plots_firmas[[i]])
+}
+
+# [MOD-14] Exporta todos los paneles a un PDF multi-página en la carpeta
+# compartida de gráficas de Adidas. Se mantiene como un solo archivo
+# multi-página (no uno por panel) porque el número de paneles depende de
+# los datos y son exploratorios, no figuras individuales de tesis.
+archivo_firmas <- file.path(dir_graficas, "25_firmas_marca_adidas_test.pdf")
+grDevices::cairo_pdf(archivo_firmas, width = 12, height = 6, onefile = TRUE)
+invisible(lapply(plots_firmas, function(p) if (!is.null(p)) print(p)))
+grDevices::dev.off()
+
+message("PDF de firmas guardado: ", archivo_firmas)
+message("Total de paneles de firmas: ", length(plots_firmas))
+```
+
+> **Output esperado:** Los primeros 3 paneles de firmas de marca renderizados en el documento, en español y fuente serif, más el mensaje de confirmación del PDF guardado en `Graficas_Addidas`. Cada panel muestra para 1-3 clientes la proporción de compras por marca de moda, incluyendo Adidas y sus co-marcas compradas en T2.
+
+---
+
+# Bloque 26 — Preprocesamiento final: funciones de rango, NZV y Spearman
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque define el conjunto completo de funciones de preprocesamiento final que se aplicarán a las matrices V y W antes de exportarlas al modelo. Implementa la **Sección 6 del paper** (Pre-processing), que establece tres pasos para la selección y transformación de covariables:
+
+**1. Verificación de rango completo** (`rank_report()`): Diagnostica si la matriz de diseño tiene rango completo de columna, condición necesaria para que la matriz $(X^TX)$ sea invertible y el estimador MLE del modelo POGIT exista. Reporta también el número de condición (κ), que mide la sensibilidad numérica de la inversión.
+
+**2. Limpieza de columnas problemáticas** (`drop_allzero_constant_nzv()`): Elimina en tres pasos columnas que no aportan información predictiva: (a) todas en cero, (b) constantes (un solo valor único), (c) near-zero variance vía `caret::nearZeroVar()`.
+
+**3. Selección por correlación de Spearman** (`select_W_from5_spearman()`): Para W (no para V), aplica el criterio de correlación de Spearman con cutoff 0.90 para eliminar variables redundantes entre sí. Las primeras 4 columnas de W (RFM) están protegidas y nunca se eliminan.
+
+La función maestra `make_fullrank_VW()` orquesta todos estos pasos manteniendo la garantía de no data leakage: todos los parámetros de transformación (caps NZV, parámetros de escala, selección Spearman) se estiman en TRAIN y se aplican a TEST.
+
+## Términos nuevos o poco comunes
+
+- **Rango de columna (`rank_report`)**: El rango de una matriz es el número de columnas linealmente independientes. Una matriz con rango completo de columna (rank = número de columnas) no tiene columnas redundantes y su $(X^TX)$ es invertible.
+- **Número de condición (κ)**: Medida de qué tan cerca está una matriz de ser singular. Un κ alto (>1000) indica que la inversión numérica será inestable, aunque el rango sea técnicamente completo.
+- **NZV (Near Zero Variance)**: Variables con muy poca variabilidad (ej: 99% de un valor). Son técnicamente no constantes pero aportan información casi nula y pueden causar inestabilidad numérica.
+- **`caret::nearZeroVar()`**: Función que identifica variables con frecuencia de la moda muy alta (>95%) y ratio de frecuencia del valor más común al segundo muy alto (>19). Estas heurísticas identifican variables que prácticamente no varían.
+- **Correlación de Spearman**: Medida de correlación basada en rangos, robusta a distribuciones no normales y a la no-linealidad monótona. Apropiada para variables de gasto (asimétricas) como las de W.
+- **`caret::findCorrelation()`**: Dada una matriz de correlaciones, identifica el conjunto mínimo de columnas a eliminar para que todas las correlaciones restantes sean menores al cutoff. Usa un algoritmo greedy que elimina primero la columna con la correlación promedio más alta.
+- **`scale_W_cols_train_only()`**: Estandarización Z-score donde $z = (x - \mu_{train}) / \sigma_{train}$. Los parámetros $\mu$ y $\sigma$ se calculan en TRAIN y se aplican a TEST sin recalcular.
+
+```{r bloque-26-funciones-preprocesamiento}
+as_numeric_matrix <- function(df, id_col = "response_id") {
+  stopifnot(id_col %in% names(df))
+  X <- df %>% dplyr::select(-dplyr::all_of(id_col))
+  X <- X %>% dplyr::mutate(dplyr::across(dplyr::everything(),
+                                          ~ suppressWarnings(as.numeric(.x))))
+  as.matrix(X)
+}
+
+rank_report <- function(df, id_col = "response_id", tol = 1e-10) {
+  X <- as_numeric_matrix(df, id_col)
+  X[is.na(X)] <- 0
+  q <- qr(X, tol = tol)
+  r <- q$rank
+  list(
+    n = nrow(X), p = ncol(X),
+    rank = r,
+    full_col_rank = (r == ncol(X)),
+    deficiency = ncol(X) - r,
+    kappa = tryCatch(kappa(X), error = function(e) NA_real_)
+  )
+}
+
+drop_allzero_constant_nzv <- function(df, id_col = "response_id", nzv = TRUE) {
+  X  <- df %>% dplyr::select(-dplyr::all_of(id_col)) %>% dplyr::select(where(is.numeric))
+  X0 <- X; X0[is.na(X0)] <- 0
+  
+  all_zero <- names(X0)[vapply(X0, function(z) all(z == 0), logical(1))]
+  constant <- names(X0)[vapply(X0, function(z) length(unique(z)) == 1, logical(1))]
+  
+  keep <- setdiff(names(X0), union(all_zero, constant))
+  X1 <- X0[, keep, drop = FALSE]
+  
+  nzv_cols <- character(0)
+  if (nzv && ncol(X1) > 0) {
+    nzv_idx <- caret::nearZeroVar(X1)
+    if (length(nzv_idx) > 0) nzv_cols <- colnames(X1)[nzv_idx]
+    X1 <- X1[, setdiff(colnames(X1), nzv_cols), drop = FALSE]
+  }
+  
+  list(
+    kept = colnames(X1),
+    removed = list(all_zero = all_zero,
+                   constant = setdiff(constant, all_zero),
+                   nzv = nzv_cols)
+  )
+}
+
+scale_W_cols_train_only <- function(W_train, W_test, cols_to_scale, id_col = "response_id") {
+  stopifnot(id_col %in% names(W_train), id_col %in% names(W_test))
+  cols_to_scale <- intersect(cols_to_scale, setdiff(names(W_train), id_col))
+  if (length(cols_to_scale) == 0) {
+    return(list(W_train_sc=W_train, W_test_sc=W_test,
+                mu=numeric(0), sd=numeric(0), scaled_cols=character(0)))
+  }
+  
+  Wtr <- W_train; Wte <- W_test
+  Wtr[cols_to_scale] <- lapply(Wtr[cols_to_scale],
+                                function(x) suppressWarnings(as.numeric(x)))
+  Wte[cols_to_scale] <- lapply(Wte[cols_to_scale],
+                                function(x) suppressWarnings(as.numeric(x)))
+  
+  mu  <- vapply(Wtr[cols_to_scale], function(x) mean(x, na.rm=TRUE), numeric(1))
+  sdv <- vapply(Wtr[cols_to_scale], function(x) stats::sd(x, na.rm=TRUE), numeric(1))
+  ok  <- is.finite(sdv) & sdv > 0
+  scaled_cols <- cols_to_scale[ok]
+  
+  for (cc in scaled_cols) {
+    Wtr[[cc]] <- (Wtr[[cc]] - mu[cc]) / sdv[cc]
+    Wte[[cc]] <- (Wte[[cc]] - mu[cc]) / sdv[cc]
+  }
+  
+  list(W_train_sc=Wtr, W_test_sc=Wte, mu=mu, sd=sdv, scaled_cols=scaled_cols)
+}
+
+select_W_from5_spearman <- function(W_train, W_test, id_col = "response_id",
+                                    keep_first_k = 4, cutoff = 0.90,
+                                    nzv = TRUE, scale_selected = TRUE) {
+  stopifnot(id_col %in% names(W_train), id_col %in% names(W_test))
+  feats <- setdiff(names(W_train), id_col)
+  
+  fixed     <- feats[seq_len(min(keep_first_k, length(feats)))]
+  cand      <- setdiff(feats, fixed)
+  keep_inf  <- drop_allzero_constant_nzv(
+    W_train %>% dplyr::select(dplyr::all_of(id_col), dplyr::all_of(cand)),
+    id_col=id_col, nzv=nzv
+  )
+  cand_kept <- keep_inf$kept
+  
+  if (length(cand_kept) > 1) {
+    X <- W_train %>%
+      dplyr::select(dplyr::all_of(cand_kept)) %>%
+      dplyr::mutate(dplyr::across(dplyr::everything(),
+                                   ~ suppressWarnings(as.numeric(.x)))) %>%
+      as.matrix()
+    X[is.na(X)] <- 0
+    
+    cor_mat  <- suppressWarnings(stats::cor(X, method="spearman", use="pairwise.complete.obs"))
+    diag(cor_mat) <- 1
+    drop_idx <- caret::findCorrelation(cor_mat, cutoff=cutoff, names=FALSE, exact=TRUE)
+    dropped_corr <- if (length(drop_idx)>0) colnames(cor_mat)[drop_idx] else character(0)
+    cand_kept <- setdiff(cand_kept, dropped_corr)
+  } else {
+    dropped_corr <- character(0)
+  }
+  
+  selected <- c(fixed, cand_kept)
+  Wtr_sel  <- W_train %>% dplyr::select(dplyr::all_of(id_col), dplyr::all_of(selected))
+  Wte_sel  <- W_test  %>% dplyr::select(dplyr::all_of(id_col), dplyr::all_of(selected))
+  
+  sc <- if (scale_selected)
+    scale_W_cols_train_only(Wtr_sel, Wte_sel, selected, id_col)
+  else
+    list(W_train_sc=Wtr_sel, W_test_sc=Wte_sel,
+         mu=numeric(0), sd=numeric(0), scaled_cols=character(0))
+  
+  list(
+    W_train_sel=sc$W_train_sc, W_test_sel=sc$W_test_sc,
+    fixed=fixed, kept_from5=cand_kept,
+    dropped_bad=keep_inf$removed, dropped_corr=dropped_corr,
+    cutoff=cutoff, scaled_cols=sc$scaled_cols,
+    scale_params=list(mu=sc$mu, sd=sc$sd)
+  )
+}
+
+make_fullrank_VW <- function(V_train, V_test, W_train, W_test,
+                              id_col="response_id", V_last_col=NULL,
+                              W_keep_first_k=4, W_cutoff=0.90,
+                              nzv=TRUE, scale_W=TRUE) {
+  stopifnot(identical(as.character(V_train[[id_col]]), as.character(W_train[[id_col]])))
+  stopifnot(identical(as.character(V_test[[id_col]]),  as.character(W_test[[id_col]])))
+  
+  Vtr <- V_train; Vte <- V_test
+  feats_V <- setdiff(names(Vtr), id_col)
+  if (is.null(V_last_col)) V_last_col <- tail(feats_V, 1)
+  stopifnot(V_last_col %in% names(Vtr))
+  
+  mu_v <- NA_real_; sd_v <- NA_real_
+  if (is.numeric(Vtr[[V_last_col]])) {
+    mu_v <- mean(Vtr[[V_last_col]], na.rm=TRUE)
+    sd_v <- stats::sd(Vtr[[V_last_col]], na.rm=TRUE)
+    if (is.finite(sd_v) && sd_v > 0) {
+      Vtr[[V_last_col]] <- (Vtr[[V_last_col]] - mu_v) / sd_v
+      Vte[[V_last_col]] <- (Vte[[V_last_col]] - mu_v) / sd_v
+    }
+  }
+  
+  Wres <- select_W_from5_spearman(
+    W_train, W_test, id_col=id_col,
+    keep_first_k=W_keep_first_k, cutoff=W_cutoff,
+    nzv=nzv, scale_selected=scale_W
+  )
+  
+  rep <- list(
+    V_train = rank_report(Vtr, id_col),
+    V_test  = rank_report(Vte, id_col),
+    W_train = rank_report(Wres$W_train_sel, id_col),
+    W_test  = rank_report(Wres$W_test_sel,  id_col)
+  )
+  
+  list(
+    V_train2=Vtr, V_test2=Vte,
+    W_train2=Wres$W_train_sel, W_test2=Wres$W_test_sel,
+    report_rank=rep,
+    V_last_col=V_last_col,
+    V_scale_params=list(mu=mu_v, sd=sd_v),
+    removed_W_bad=Wres$dropped_bad,
+    dropped_W_corr=Wres$dropped_corr,
+    kept_W_from5=Wres$kept_from5,
+    fixed_W_1to4=Wres$fixed,
+    W_scaled_cols=Wres$scaled_cols,
+    W_scale_params=Wres$scale_params
+  )
+}
+```
+
+> **Output esperado:** Ningún output visible. Todas las funciones del bloque (`as_numeric_matrix`, `rank_report`, `drop_allzero_constant_nzv`, `scale_W_cols_train_only`, `select_W_from5_spearman`, `make_fullrank_VW`) quedan registradas en el entorno global de R.
+
+---
+
+# Bloque 27 — Ejecución de `make_fullrank_VW` y reporte de rango
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque ejecuta la función `make_fullrank_VW()` que orquesta todo el preprocesamiento final de las matrices V y W. Es la llamada principal que conecta todos los elementos definidos en el Bloque 26 y produce las matrices limpias, seleccionadas y escaladas que entrarán al modelo POGIT.
+
+Los parámetros clave son:
+- `V_last_col = "n_states"`: declara explícitamente que `n_states` es la única columna continua de V que debe estandarizarse.
+- `W_keep_first_k = 4`: protege las primeras 4 columnas de W (recency, frequency, monetary + una adicional) de ser eliminadas por NZV o Spearman.
+- `W_cutoff = 0.90`: elimina variables de W con correlación Spearman mayor al 90% en el TRAIN.
+- `nzv = TRUE`: aplica nearZeroVar() a las columnas candidatas de W (no a las 4 fijas).
+- `scale_W = TRUE`: estandariza todas las columnas seleccionadas de W con parámetros del TRAIN.
+
+El reporte de rango final (`res$report_rank`) permite verificar que las matrices resultantes tienen rango completo y están listas para el optimizador del modelo POGIT. Una deficiencia mayor que 0 indica multicolinealidad residual que debería investigarse antes de proceder a la estimación.
+
+## Términos nuevos o poco comunes
+
+- **`res$report_rank$V_train$full_col_rank`**: Extrae el elemento `full_col_rank` del reporte de V_train, dentro del objeto `res`. `TRUE` indica rango completo.
+- **`res$report_rank$V_train$deficiency`**: Número de columnas linealmente dependientes (rango deficiente). Debería ser 0 para matrices correctamente preprocesadas.
+- **`length(res$W_scaled_cols)`**: Número de columnas de W que fueron efectivamente estandarizadas. Puede ser menor que el total de columnas de W si alguna tenía desviación estándar cero en TRAIN.
+- **`head(res$W_scaled_cols, 20)`**: Muestra los primeros 20 nombres de columnas estandarizadas, para verificar que las columnas esperadas fueron procesadas.
+
+```{r bloque-27-ejecucion-make-fullrank}
+res <- make_fullrank_VW(
+  V_train = V_train,
+  V_test  = V_test,
+  W_train = W_train,
+  W_test  = W_test,
+  id_col         = "response_id",
+  V_last_col     = "n_states",
+  W_keep_first_k = 4,
+  W_cutoff       = 0.90,
+  nzv            = TRUE,
+  scale_W        = TRUE
+)
+
+V_train2 <- res$V_train2
+V_test2  <- res$V_test2
+W_train2 <- res$W_train2
+W_test2  <- res$W_test2
+
+cat("=== Reporte de rango — Matrices Adidas ===\n")
+cat("V_train — full col rank:", res$report_rank$V_train$full_col_rank,
+    " | deficiency:", res$report_rank$V_train$deficiency,
+    " | p:", res$report_rank$V_train$p, "\n")
+cat("V_test  — full col rank:", res$report_rank$V_test$full_col_rank,
+    " | deficiency:", res$report_rank$V_test$deficiency, "\n")
+cat("W_train — full col rank:", res$report_rank$W_train$full_col_rank,
+    " | deficiency:", res$report_rank$W_train$deficiency,
+    " | p:", res$report_rank$W_train$p, "\n")
+cat("W_test  — full col rank:", res$report_rank$W_test$full_col_rank,
+    " | deficiency:", res$report_rank$W_test$deficiency, "\n")
+cat("W columnas estandarizadas (TRAIN→TEST):", length(res$W_scaled_cols), "\n")
+cat("W columnas eliminadas por correlación Spearman:", length(res$dropped_W_corr), "\n")
+```
+
+> **Output esperado:** El reporte de rango con `full_col_rank = TRUE` y `deficiency = 0` para las cuatro matrices (V_train, V_test, W_train, W_test). Si `deficiency > 0`, hay multicolinealidad residual que debe investigarse. El número de columnas estandarizadas y eliminadas por Spearman da información sobre el proceso de selección.
+
+---
+
+# Bloque 28 — Exportación de matrices a Excel
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-12 y MOD-15 — CAMBIO ADIDAS:** El archivo de salida se llama `matrices_data_adidas.xlsx`.
+> Además, se agregan dos hojas (`ids_train`, `ids_test`) con el `response_id` de cada fila,
+> en el mismo orden que las matrices correspondientes — para poder rastrear qué cliente es
+> cada fila una vez que el archivo se usa fuera de esta sesión de R (Script 3, Python, etc.).
+
+Este es el bloque final del Script 2: exporta las seis matrices del modelo POGIT, más sus dos hojas de identificadores, a un archivo Excel. Este archivo es el **input principal del Script 3** (estimación del modelo) y constituye el entregable central de todo el pipeline de preparación de datos.
+
+Las ocho hojas que se exportan son:
+- `ids_train` e `ids_test`: el `response_id` de cada cliente, en el mismo orden de fila que las seis matrices siguientes. No entran al modelo — son solo para trazabilidad.
+- `V_train` y `V_test`: covariables de asignación (SoW), que entran al componente logit del POGIT como $x_1$.
+- `W_train` y `W_test`: covariables de intensidad (SioW), que entran al componente Poisson como $x_2$.
+- `Y_train` e `Y_test`: variable de respuesta discretizada (gasto Adidas en conteos normalizados), que es el $y_i$ del modelo.
+
+Antes de exportar, cada matriz (V y W) pasa por `to_num_mat()` (fuerza todo a numérico y reemplaza NAs residuales con 0) y `add_intercept()` (añade una columna de unos como primera columna). El intercepto explícito es necesario porque el modelo POGIT, a diferencia de `lm()`, no añade intercepto automáticamente: la primera columna de $x_1$ y $x_2$ debe ser una constante 1 para que los parámetros $\beta_0$ y $\gamma_0$ del modelo sean estimables. El `response_id` se guarda **antes** de este paso, precisamente porque no debe entrar a la matriz numérica del modelo — solo acompaña el archivo como referencia.
+
+Los `stopifnot()` verifican consistencia entre train y test (mismo número de columnas), que la columna intercepto sea efectivamente todo unos, y que la cantidad de IDs coincida exactamente con el número de filas de cada matriz y de Y.
+
+## Términos nuevos o poco comunes
+
+- **Intercepto explícito**: Columna de unos añadida como primera columna de la matriz de diseño. Permite estimar el término independiente del modelo ($\beta_0$). En `lm()` se añade automáticamente; en estimadores personalizados como el POGIT debe incluirse manualmente.
+- **`to_num_mat()`**: Función local que convierte todas las columnas de un dataframe a numérico y reemplaza `NA` residuales con 0. Paso final de limpieza antes de exportar.
+- **`add_intercept()`**: Función local que añade una columna llamada "Intercept" con todos los valores iguales a 1, como primera columna de la matriz. Usa `cbind()` para la concatenación.
+- **`openxlsx::createWorkbook()`**: Crea un libro de Excel vacío en memoria. No escribe nada al disco hasta que se llama `saveWorkbook()`.
+- **`openxlsx::addWorksheet()` y `openxlsx::writeData()`**: Añaden una hoja al libro y escriben un dataframe en ella, respectivamente.
+- **`openxlsx::saveWorkbook(..., overwrite = TRUE)`**: Escribe el libro en disco. `overwrite = TRUE` reemplaza el archivo si ya existe sin preguntar.
+
+```{r bloque-28-export-matrices}
+to_num_mat <- function(df) {
+  df %>%
+    dplyr::mutate(dplyr::across(dplyr::everything(),
+                                 ~ suppressWarnings(as.numeric(.x)))) %>%
+    dplyr::mutate(dplyr::across(dplyr::everything(),
+                                 ~ tidyr::replace_na(.x, 0)))
+}
+
+add_intercept <- function(df, name = "Intercept") {
+  df <- dplyr::relocate(df, dplyr::everything())
+  cbind(stats::setNames(data.frame(rep(1, nrow(df))), name), df)
+}
+
+# [MOD-15] Se guardan los IDs ANTES de quitarlos de las matrices numéricas.
+# Las matrices V/W que entran al modelo deben ser puramente numéricas (por
+# eso se sigue haciendo select(-response_id) para esas), pero los IDs no se
+# descartan: se exportan en hojas separadas, en el mismo orden de fila que
+# V_train/W_train/Y_train, para poder rastrear qué cliente es cada fila una
+# vez que el archivo sale de esta sesión de R.
+ids_train <- V_train2$response_id
+ids_test  <- V_test2$response_id
+
+stopifnot(identical(ids_train, W_train2$response_id))
+stopifnot(identical(ids_test,  W_test2$response_id))
+
+V_train_mat <- V_train2 %>% dplyr::select(-response_id) %>% to_num_mat() %>% add_intercept()
+V_test_mat  <- V_test2  %>% dplyr::select(-response_id) %>% to_num_mat() %>% add_intercept()
+W_train_mat <- W_train2 %>% dplyr::select(-response_id) %>% to_num_mat() %>% add_intercept()
+W_test_mat  <- W_test2  %>% dplyr::select(-response_id) %>% to_num_mat() %>% add_intercept()
+
+stopifnot(ncol(V_train_mat) == ncol(V_test_mat))
+stopifnot(ncol(W_train_mat) == ncol(W_test_mat))
+stopifnot(all(V_train_mat$Intercept == 1), all(V_test_mat$Intercept == 1))
+stopifnot(all(W_train_mat$Intercept == 1), all(W_test_mat$Intercept == 1))
+
+# [MOD-15] Verificación final: cada fila de ids_train/ids_test corresponde
+# exactamente a la misma fila en V_train_mat/W_train_mat/Y_train (y su par de test)
+stopifnot(length(ids_train) == nrow(V_train_mat))
+stopifnot(length(ids_train) == length(Y_train))
+stopifnot(length(ids_test)  == nrow(V_test_mat))
+stopifnot(length(ids_test)  == length(Y_test))
+
+if (!dir.exists("data/matrices")) dir.create("data/matrices", recursive = TRUE)
+
+# [MOD-12] Nombre del archivo cambiado para Adidas
+wb <- openxlsx::createWorkbook()
+
+# [MOD-15] Hojas de IDs, mismo orden de fila que las matrices correspondientes
+openxlsx::addWorksheet(wb, "ids_train"); openxlsx::writeData(wb, "ids_train", data.frame(response_id = ids_train))
+openxlsx::addWorksheet(wb, "ids_test");  openxlsx::writeData(wb, "ids_test",  data.frame(response_id = ids_test))
+
+openxlsx::addWorksheet(wb, "V_train"); openxlsx::writeData(wb, "V_train", as.data.frame(V_train_mat))
+openxlsx::addWorksheet(wb, "V_test");  openxlsx::writeData(wb, "V_test",  as.data.frame(V_test_mat))
+openxlsx::addWorksheet(wb, "W_train"); openxlsx::writeData(wb, "W_train", as.data.frame(W_train_mat))
+openxlsx::addWorksheet(wb, "W_test");  openxlsx::writeData(wb, "W_test",  as.data.frame(W_test_mat))
+openxlsx::addWorksheet(wb, "Y_train"); openxlsx::writeData(wb, "Y_train", as.data.frame(Y_train))
+openxlsx::addWorksheet(wb, "Y_test");  openxlsx::writeData(wb, "Y_test",  as.data.frame(Y_test))
+
+openxlsx::saveWorkbook(wb, file = "data/matrices/matrices_data_adidas.xlsx", overwrite = TRUE)
+
+cat("=== Matrices exportadas: matrices_data_adidas.xlsx ===\n")
+cat("ids_train:", length(ids_train), "response_id | ids_test:", length(ids_test), "response_id\n")
+cat("V_train:", nrow(V_train_mat), "×", ncol(V_train_mat), "(con intercepto)\n")
+cat("V_test: ", nrow(V_test_mat),  "×", ncol(V_test_mat),  "(con intercepto)\n")
+cat("W_train:", nrow(W_train_mat), "×", ncol(W_train_mat), "(con intercepto)\n")
+cat("W_test: ", nrow(W_test_mat),  "×", ncol(W_test_mat),  "(con intercepto)\n")
+cat("Y_train:", length(Y_train), "valores | Y_test:", length(Y_test), "valores\n")
+```
+
+> **Output esperado:** El resumen de dimensiones de las ocho hojas exportadas. V_train y V_test deben tener el mismo número de columnas; lo mismo para W_train y W_test. La columna 1 de todas las matrices V y W es "Intercept" (todo unos). `length(ids_train)` debe coincidir con `nrow(V_train)` y con `length(Y_train)` (y análogamente para test). El archivo `matrices_data_adidas.xlsx` quedará en `data/matrices/`, listo para ser importado en el Script 3 — incluyendo sus hojas `ids_train`/`ids_test` para poder cruzar cualquier fila con el cliente real.
+
+---
+

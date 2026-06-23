@@ -1,0 +1,562 @@
+---
+title: "Pipeline POGIT — Adidas | Script 1: Preparación del Survey"
+author: "Tesis de Maestría"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  cache   = FALSE
+)
+```
+
+---
+
+> **Sobre este documento**
+> Este R Markdown corresponde al **Script 1** del pipeline POGIT aplicado a la marca **Adidas**.
+> Está basado directamente en el `code1.R` entregado por la directora de tesis (caso Apple).
+> El script carga el survey de participantes del panel Amazon, construye las variables dummy
+> de raza y eventos de vida, e integra todo en un objeto `survey_enriched` que será consumido
+> por el Script 2.
+>
+> **Modificaciones respecto a `code1.R` (Apple):**
+>
+> | Etiqueta | Bloque | Descripción |
+> |----------|--------|-------------|
+> | MOD-01 | Bloque 9 | *(Eliminado)* Ya no se genera un PDF combinado; ver MOD-04 |
+> | MOD-02 | Bloque 3 | `bar_plot()` ahora acepta fuente serif/Times y tamaños configurables (`base_size`, `font_family`, `axis_text_size`) |
+> | MOD-03 | Bloques 8 y 9 | Los 20 títulos y etiquetas de las gráficas se tradujeron al español |
+> | MOD-04 | Bloque 9 | Cada gráfica se exporta como **PDF individual** vía `ggsave()` a 7×5 in / 300 dpi, directamente en `C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Addidas`, lista para incluir en LaTeX |
+> | MOD-05 | Bloque 3, 8, 9 | `bar_plot()` envuelve automáticamente títulos largos (`title_wrap`) y, para variables con categorías largas, también las etiquetas del eje (`label_wrap`) — corrige el recorte que aparecía en raza, educación, frecuencia y cambios de vida |
+>
+> Los Bloques 1, 2, 4, 5, 6 y 7 son idénticos al original porque el survey es el mismo
+> para Apple y para Adidas: los mismos participantes, las mismas preguntas demográficas.
+> Los cambios de esta versión se concentran en la presentación visual de las gráficas
+> (Bloques 3, 8 y 9), no en la lógica de datos.
+
+---
+
+# Bloque 1 — Carga de paquetes
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Antes de ejecutar cualquier análisis, R necesita cargar las **librerías** que contienen las funciones especializadas del pipeline. Este bloque define el listado completo de paquetes y los carga mediante una función personalizada `load_pkg()`, que verifica que todos hayan sido instalados correctamente.
+
+La razón de centralizar la carga aquí es que si algún paquete falta, el error aparece desde el inicio y no a mitad del análisis. Los paquetes cubren cuatro grandes áreas: **manipulación de datos** (`tidyverse`, `janitor`, `lubridate`), **visualización** (`ggplot2`, `scales`, `patchwork`), **modelación** (`pscl`, `tidymodels`, `caret`) y **cómputo paralelo** (`parallel`, `furrr`, `optimParallel`), este último necesario para la estimación del modelo POGIT en el Script 3.
+
+```{r bloque-1-paquetes}
+packages <- unique(c(
+  "tidyverse", "lubridate", "janitor", "skimr", "snakecase",
+  "stringr", "dplyr", "gridExtra", "scales", "viridis",
+  "patchwork", "fastDummies", "readxl", "openxlsx", "tidymodels",
+  "Matrix", "caret", "pscl", "xgboost", "Metrics",
+  "numDeriv", "optimParallel", "parallel", "furrr", "progressr",
+  "tibble", "readr", "forcats", "ggplot2", "tidyr"
+))
+
+load_pkg <- function(pkgs) {
+  ok <- vapply(pkgs, function(p) {
+    suppressPackageStartupMessages(require(p, character.only = TRUE))
+  }, logical(1))
+  if (any(!ok)) {
+    stop("Packages not installed/loaded: ", paste(pkgs[!ok], collapse = ", "))
+  }
+  invisible(ok)
+}
+load_pkg(packages)
+```
+
+---
+
+# Bloque 2 — Configuración visual y paleta de colores
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Este bloque establece dos configuraciones globales: el **locale** del sistema y la **paleta de colores**. Ambas deben definirse *antes* de la función `bar_plot()` del Bloque 3, porque `bar_plot()` usa `pal` como valor por defecto de su argumento `fill_pal`.
+
+```{r bloque-2-config-visual}
+loc_ok <- base::Sys.setlocale("LC_ALL", "es_ES.UTF-8")
+if (identical(loc_ok, "")) {
+  warning(
+    "Could not set locale 'es_ES.UTF-8'; ",
+    "separators and month names will use the default locale."
+  )
+}
+
+pal <- c(
+  azul_1   = "#4E79A7",
+  naranja  = "#F28E2B",
+  rojo     = "#E15759",
+  turquesa = "#76B7B2",
+  verde    = "#59A14F",
+  amarillo = "#EDC948",
+  morado   = "#B07AA1",
+  rosa     = "#FF9DA7",
+  cafe     = "#9C755F",
+  gris     = "#BAB0AC"
+)
+```
+
+---
+
+# Bloque 3 — Función `bar_plot()` y funciones auxiliares
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-02 — CAMBIO ADIDAS:** `bar_plot()` ahora recibe tres argumentos nuevos:
+> `base_size` (tamaño base del texto del tema, default 18 — antes el default implícito de
+> `theme_minimal()` era 11), `font_family` (default `"serif"`, que renderiza como una
+> tipografía tipo Times en la mayoría de dispositivos PDF) y `axis_text_size` (override
+> opcional, solo para variables con muchas categorías donde el texto del eje necesita ser
+> más pequeño que el resto para no desbordarse — ej. estado, raza, educación).
+>
+> También se tradujo la etiqueta fija del eje Y, que antes decía `"Number of participants"`.
+
+Este bloque define la función `bar_plot()` y dos funciones auxiliares de uso general en el pipeline: `mode_safe()` y `reorder_drop_id()`.
+
+`bar_plot()` genera gráficas de barras **horizontales** estandarizadas para cualquier variable categórica del survey. Encapsula la lógica de visualización siguiendo el principio **DRY**: en lugar de repetir el código 20 veces, una sola función recibe el dataframe, la variable, los títulos y parámetros opcionales y produce el gráfico.
+
+**Nota sobre la fuente "Times Roman":** `family = "serif"` es la opción más robusta multiplataforma — en la gran mayoría de los dispositivos PDF de R (especialmente `cairo_pdf`, que se usa en el Bloque 9) se renderiza como una tipografía métricamente equivalente a Times. Si tu universidad exige el nombre exacto **"Times New Roman"** (no solo una serif equivalente), la alternativa más confiable es el paquete `showtext`, que carga el archivo de fuente real sin depender de qué tenga instalado el sistema operativo:
+>
+> ```r
+> # Alternativa para fuente EXACTA "Times New Roman" (opcional, multiplataforma)
+> # install.packages("showtext")
+> # library(showtext)
+> # font_add(family = "Times New Roman",
+> #          regular = "C:/Windows/Fonts/times.ttf")  # Windows
+> # # regular = "/System/Library/Fonts/Supplemental/Times New Roman.ttf"  # Mac
+> # showtext_auto()
+> # # Luego usar font_family = "Times New Roman" en bar_plot()
+> ```
+>
+> Por defecto dejamos `"serif"` porque no depende de rutas de archivo ni de instalar nada adicional.
+
+`mode_safe()` calcula la moda de un vector ignorando NAs. `reorder_drop_id()` filtra un dataframe a un conjunto de `response_id` y los reordena para coincidir exactamente con el orden de referencia — se usará en el Script 2.
+
+```{r bloque-3-funciones}
+bar_plot <- function(df, var, title, x_lab,
+                     fill_pal = pal, text_size = 4.5,
+                     base_size = 18, font_family = "serif",
+                     axis_text_size = NULL,
+                     title_wrap = 36, label_wrap = NULL) {
+
+  counts <- df %>%
+    dplyr::filter(!is.na({{ var }})) %>%
+    dplyr::count({{ var }}, name = "n") %>%
+    dplyr::mutate(
+      pct     = n / sum(n) * 100,
+      var_chr = as.character({{ var }})
+    ) %>%
+    dplyr::arrange(dplyr::desc(n)) %>%
+    dplyr::mutate(var_chr = forcats::fct_reorder(var_chr, n))
+
+  fill_vals <- rep(unname(fill_pal), length.out = nrow(counts))
+  names(fill_vals) <- levels(counts$var_chr)
+
+  # [MOD-05] ggplot2 NO hace salto de l\u00ednea autom\u00e1tico en el t\u00edtulo. Si el
+  # t\u00edtulo es m\u00e1s ancho que el lienzo (en especial con base_size grande),
+  # se recorta en el borde derecho en vez de pasar a una segunda l\u00ednea.
+  # str_wrap() lo soluciona insertando saltos de l\u00ednea donde haga falta.
+  title_wrapped <- stringr::str_wrap(title, width = title_wrap)
+
+  p <- ggplot2::ggplot(counts, ggplot2::aes(x = var_chr, y = n, fill = var_chr)) +
+    ggplot2::geom_col() +
+    ggplot2::geom_text(
+      ggplot2::aes(label = sprintf("%.1f%%", pct), y = n),
+      hjust = -0.1, size = text_size, colour = "black",
+      family = font_family
+    ) +
+    ggplot2::coord_flip() +
+    ggplot2::scale_y_continuous(
+      expand = ggplot2::expansion(mult = c(0, 0.20))
+    ) +
+    ggplot2::scale_fill_manual(values = fill_vals, guide = "none") +
+    ggplot2::labs(title = title_wrapped, x = x_lab, y = "N\u00famero de participantes") +
+    ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      text = ggplot2::element_text(family = font_family),
+      plot.title = ggplot2::element_text(lineheight = 1.05)
+    )
+
+  # [MOD-02] Override opcional de tama\u00f1o de texto del eje (variables con muchas categor\u00edas)
+  if (!is.null(axis_text_size)) {
+    p <- p + ggplot2::theme(axis.text.y = ggplot2::element_text(size = axis_text_size))
+  }
+
+  # [MOD-05] Override opcional: envuelve en varias l\u00edneas las categor\u00edas del
+  # eje cuyo texto es largo (raza, educaci\u00f3n, eventos de vida, frecuencia...),
+  # para que no empujen el resto de la gr\u00e1fica fuera del lienzo.
+  if (!is.null(label_wrap)) {
+    p <- p + ggplot2::scale_x_discrete(
+      labels = function(x) stringr::str_wrap(x, width = label_wrap)
+    )
+  }
+
+  p
+}
+
+mode_safe <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0) return(NA_character_)
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+reorder_drop_id <- function(df, ref_ids) {
+  df %>%
+    dplyr::filter(response_id %in% ref_ids) %>%
+    dplyr::slice(match(ref_ids, response_id))
+}
+```
+
+> **Output esperado:** Ningún output visible. `exists("bar_plot")` devolverá `TRUE`.
+
+---
+
+# Bloque 4 — Carga del survey
+
+```{r bloque-4-carga-survey}
+survey <- readr::read_csv(
+  "data/survey-data/survey.csv",
+  show_col_types = FALSE
+) %>%
+  janitor::clean_names()
+
+message("Survey cargado: ", nrow(survey), " filas, ", ncol(survey), " columnas")
+```
+
+---
+
+# Bloque 5 — Procesamiento de la pregunta de raza (multi-respuesta)
+
+```{r bloque-5-race-dummies}
+race_levels <- c(
+  "White or Caucasian",
+  "Black or African American",
+  "Asian",
+  "American Indian/Native American or Alaska Native",
+  "Native Hawaiian or Other Pacific Islander",
+  "Other"
+)
+
+race_long <- survey %>%
+  dplyr::select(response_id, race_raw = q_demos_race) %>%
+  dplyr::filter(!is.na(race_raw) & race_raw != "") %>%
+  dplyr::mutate(
+    race_raw = race_raw %>%
+      stringr::str_replace_all("\\s*/\\s*", "/") %>%
+      stringr::str_replace_all("\\s*,\\s*", ", ") %>%
+      stringr::str_squish()
+  ) %>%
+  tidyr::separate_rows(race_raw, sep = ",\\s*") %>%
+  dplyr::mutate(race_raw = stringr::str_trim(race_raw))
+
+race_dummies <- race_long %>%
+  dplyr::mutate(
+    race  = factor(race_raw, levels = race_levels),
+    value = 1L
+  ) %>%
+  dplyr::select(-race_raw) %>%
+  tidyr::pivot_wider(
+    names_from   = race,
+    values_from  = value,
+    names_prefix = "race_",
+    values_fill  = 0L
+  ) %>%
+  janitor::clean_names()
+
+needed_race <- paste0("race_", janitor::make_clean_names(race_levels))
+race_dummies[setdiff(needed_race, names(race_dummies))] <- 0L
+
+message("race_dummies: ", ncol(race_dummies) - 1, " columnas | ",
+        nrow(race_dummies), " participantes con respuesta de raza")
+```
+
+---
+
+# Bloque 6 — Procesamiento de la pregunta de cambios de vida (multi-respuesta)
+
+```{r bloque-6-life-dummies}
+life_levels <- c(
+  "Lost a job",
+  "Moved place of residence",
+  "Divorce",
+  "Had a child",
+  "Became pregnant"
+)
+
+life_long <- survey %>%
+  dplyr::select(response_id, life_raw = q_life_changes) %>%
+  dplyr::filter(!is.na(life_raw) & life_raw != "") %>%
+  dplyr::mutate(
+    life_raw = life_raw %>%
+      stringr::str_replace_all("\\s*/\\s*", "/") %>%
+      stringr::str_replace_all("\\s*,\\s*", ", ") %>%
+      stringr::str_squish()
+  ) %>%
+  tidyr::separate_rows(life_raw, sep = ",\\s*") %>%
+  dplyr::mutate(life_raw = stringr::str_trim(life_raw))
+
+life_dummies <- life_long %>%
+  dplyr::mutate(
+    life  = factor(life_raw, levels = life_levels),
+    value = 1L
+  ) %>%
+  dplyr::select(-life_raw) %>%
+  tidyr::pivot_wider(
+    names_from   = life,
+    values_from  = value,
+    names_prefix = "life_",
+    values_fill  = 0L
+  ) %>%
+  janitor::clean_names()
+
+needed_life <- paste0("life_", janitor::make_clean_names(life_levels))
+life_dummies[setdiff(needed_life, names(life_dummies))] <- 0L
+
+message("life_dummies: ", ncol(life_dummies) - 1, " columnas | ",
+        nrow(life_dummies), " participantes con respuesta de cambios de vida")
+```
+
+---
+
+# Bloque 7 — Merge: construcción de `survey_enriched`
+
+```{r bloque-7-survey-enriched}
+survey       <- survey       %>% dplyr::distinct(response_id, .keep_all = TRUE)
+race_dummies <- race_dummies %>% dplyr::distinct(response_id, .keep_all = TRUE)
+life_dummies <- life_dummies %>% dplyr::distinct(response_id, .keep_all = TRUE)
+
+survey_enriched <- survey %>%
+  dplyr::left_join(race_dummies, by = "response_id",
+                   relationship = "one-to-one") %>%
+  dplyr::left_join(life_dummies, by = "response_id",
+                   relationship = "one-to-one")
+
+message("survey_enriched: ", nrow(survey_enriched), " filas, ",
+        ncol(survey_enriched), " columnas")
+colnames(survey_enriched)
+```
+
+---
+
+# Bloque 8 — Gráficos individuales del survey (en pantalla)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-03 — CAMBIO ADIDAS:** Los 20 títulos y etiquetas de eje se tradujeron al español.
+> El contenido y el orden de las variables es idéntico al original; solo cambia el idioma
+> y, por herencia de `bar_plot()`, la fuente y el tamaño del texto.
+
+```{r bloque-8-graficos-individuales, fig.width=10, fig.height=6}
+bar_plot(survey, q_prolific_mturk,
+         "Participaci\u00f3n en Amazon MTurk", "Respuesta")
+bar_plot(survey, q_demos_age,
+         "Distribuci\u00f3n por grupo de edad", "Grupo de edad")
+bar_plot(survey, q_demos_hispanic,
+         "Origen hispano o latino", "Respuesta",
+         fill_pal = pal[c("azul_1", "naranja")])
+bar_plot(survey, q_demos_race,
+         "Combinaciones de raza declaradas", "Combinaci\u00f3n",
+         text_size = 4.2, axis_text_size = 13, label_wrap = 30)
+bar_plot(race_long, race_raw,
+         "Participantes por raza (conteo individual)", "Raza",
+         axis_text_size = 13, label_wrap = 26)
+bar_plot(survey, q_demos_education,
+         "Nivel educativo", "Educaci\u00f3n",
+         text_size = 4.2, axis_text_size = 13, label_wrap = 24)
+bar_plot(survey, q_demos_gender,
+         "Identidad de g\u00e9nero declarada", "G\u00e9nero")
+bar_plot(survey, q_sexual_orientation,
+         "Orientaci\u00f3n sexual declarada", "Orientaci\u00f3n")
+bar_plot(survey, q_demos_state,
+         "Distribuci\u00f3n por estado", "Estado",
+         text_size = 3.6, axis_text_size = 9)
+bar_plot(survey, q_amazon_use_howmany,
+         "Personas que comparten la cuenta de Amazon", "N\u00famero de personas")
+bar_plot(survey, q_amazon_use_hh_size,
+         "Tama\u00f1o del hogar", "Personas en el hogar")
+bar_plot(survey, q_amazon_use_how_oft,
+         "Frecuencia de compra en Amazon", "Frecuencia",
+         axis_text_size = 13, label_wrap = 22)
+bar_plot(survey, q_substance_use_1,
+         "Consumo de cigarrillo en el hogar", "Respuesta")
+bar_plot(survey, q_substance_use_2,
+         "Consumo de marihuana en el hogar", "Respuesta")
+bar_plot(survey, q_substance_use_3,
+         "Consumo de alcohol en el hogar", "Respuesta")
+bar_plot(survey, q_personal_1,
+         "Diabetes en el hogar", "Respuesta")
+bar_plot(survey, q_personal_2,
+         "Uso de silla de ruedas en el hogar", "Respuesta")
+bar_plot(survey, q_life_changes,
+         "Cambios de vida en 2021 (combinaciones)", "Combinaci\u00f3n",
+         text_size = 4.2, axis_text_size = 13, label_wrap = 26)
+bar_plot(life_long, life_raw,
+         "Cambios de vida en 2021 (individual)", "Cambio de vida",
+         axis_text_size = 13, label_wrap = 22)
+bar_plot(survey, q_demos_income,
+         "Rango de ingreso", "Respuesta")
+```
+
+> **Output esperado:** 20 gráficos en español, fuente serif, con texto más grande que la
+> versión original. Si alguna categoría (especialmente Estado) se ve apretada, ajusta
+> `axis_text_size` hacia abajo para ese gráfico específico.
+
+---
+
+# Bloque 9 — Exportación individual de cada gráfica para LaTeX
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **MOD-03 y MOD-04 — CAMBIO ADIDAS:**
+> - Los 20 títulos/etiquetas están en español, igual que en el Bloque 8 (MOD-03).
+> - Cada gráfica se exporta como **archivo PDF independiente** con `ggsave()`, a
+>   7 × 5 in / 300 dpi, directamente en
+>   `C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Addidas`
+>   (MOD-04). **No se genera ningún PDF combinado/multi-página** — esa era la versión
+>   anterior; ahora cada una de las 20 gráficas vive en su propio archivo.
+>
+> Usamos `grDevices::cairo_pdf` (en vez del dispositivo `pdf()` base) por dos razones:
+> (1) maneja mejor el *embedding* de fuentes serif/Times, y (2) renderiza correctamente
+> los caracteres acentuados del español (á, é, í, ó, ú, ñ) — el dispositivo `pdf()` base
+> puede mostrarlos mal en algunos sistemas según el locale configurado.
+
+```{r bloque-9-export-pdf}
+plots_survey <- list(
+  bar_plot(survey, q_prolific_mturk,
+           "Participaci\u00f3n en Amazon MTurk", "Respuesta"),
+  bar_plot(survey, q_demos_age,
+           "Distribuci\u00f3n por grupo de edad", "Grupo de edad"),
+  bar_plot(survey, q_demos_hispanic,
+           "Origen hispano o latino", "Respuesta",
+           fill_pal = pal[c("azul_1", "naranja")]),
+  bar_plot(survey, q_demos_race,
+           "Combinaciones de raza declaradas", "Combinaci\u00f3n",
+           text_size = 4.2, axis_text_size = 13, label_wrap = 30),
+  bar_plot(race_long, race_raw,
+           "Participantes por raza (conteo individual)", "Raza",
+           axis_text_size = 13, label_wrap = 26),
+  bar_plot(survey, q_demos_education,
+           "Nivel educativo", "Educaci\u00f3n",
+           text_size = 4.2, axis_text_size = 13, label_wrap = 24),
+  bar_plot(survey, q_demos_gender,
+           "Identidad de g\u00e9nero declarada", "G\u00e9nero"),
+  bar_plot(survey, q_sexual_orientation,
+           "Orientaci\u00f3n sexual declarada", "Orientaci\u00f3n"),
+  bar_plot(survey, q_demos_state,
+           "Distribuci\u00f3n por estado", "Estado",
+           text_size = 3.6, axis_text_size = 9),
+  bar_plot(survey, q_amazon_use_howmany,
+           "Personas que comparten la cuenta de Amazon", "N\u00famero de personas"),
+  bar_plot(survey, q_amazon_use_hh_size,
+           "Tama\u00f1o del hogar", "Personas en el hogar"),
+  bar_plot(survey, q_amazon_use_how_oft,
+           "Frecuencia de compra en Amazon", "Frecuencia",
+           axis_text_size = 13, label_wrap = 22),
+  bar_plot(survey, q_substance_use_1,
+           "Consumo de cigarrillo en el hogar", "Respuesta"),
+  bar_plot(survey, q_substance_use_2,
+           "Consumo de marihuana en el hogar", "Respuesta"),
+  bar_plot(survey, q_substance_use_3,
+           "Consumo de alcohol en el hogar", "Respuesta"),
+  bar_plot(survey, q_personal_1,
+           "Diabetes en el hogar", "Respuesta"),
+  bar_plot(survey, q_personal_2,
+           "Uso de silla de ruedas en el hogar", "Respuesta"),
+  bar_plot(survey, q_life_changes,
+           "Cambios de vida en 2021 (combinaciones)", "Combinaci\u00f3n",
+           text_size = 4.2, axis_text_size = 13, label_wrap = 26),
+  bar_plot(life_long, life_raw,
+           "Cambios de vida en 2021 (individual)", "Cambio de vida",
+           axis_text_size = 13, label_wrap = 22),
+  bar_plot(survey, q_demos_income,
+           "Rango de ingreso", "Respuesta")
+)
+
+# Nombres de archivo descriptivos, en el mismo orden que plots_survey
+nombres_graficas <- c(
+  "01_participacion_mturk",
+  "02_distribucion_edad",
+  "03_origen_hispano",
+  "04_raza_combinaciones",
+  "05_raza_individual",
+  "06_nivel_educativo",
+  "07_identidad_genero",
+  "08_orientacion_sexual",
+  "09_distribucion_estado",
+  "10_personas_comparten_cuenta",
+  "11_tamano_hogar",
+  "12_frecuencia_compra",
+  "13_consumo_cigarrillo",
+  "14_consumo_marihuana",
+  "15_consumo_alcohol",
+  "16_diabetes_hogar",
+  "17_silla_ruedas",
+  "18_cambios_vida_combinaciones",
+  "19_cambios_vida_individual",
+  "20_rango_ingreso"
+)
+
+stopifnot(length(plots_survey) == length(nombres_graficas))
+
+# [MOD-04] Carpeta dedicada para las figuras listas para LaTeX
+# Ruta absoluta de Windows. Usamos "/" en vez de "\" porque R los acepta sin
+# necesidad de escapar caracteres, incluso en rutas con espacios.
+dir_latex <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Addidas"
+if (!dir.exists(dir_latex)) dir.create(dir_latex, recursive = TRUE)
+
+# [MOD-04] Exportación individual: 7 x 5 in, 300 dpi, un archivo PDF por gráfica
+purrr::walk2(
+  plots_survey, nombres_graficas,
+  function(p, nombre) {
+    ggplot2::ggsave(
+      filename = file.path(dir_latex, paste0(nombre, ".pdf")),
+      plot     = p,
+      width    = 7.0,
+      height   = 5.0,
+      units    = "in",
+      dpi      = 300,
+      device   = grDevices::cairo_pdf
+    )
+  }
+)
+
+message("Figuras individuales guardadas en: ", dir_latex,
+        " (", length(plots_survey), " archivos PDF, 7x5 in, 300 dpi)")
+```
+
+> **Output esperado:** Un mensaje confirmando los 20 PDFs individuales guardados en
+> `C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Addidas`,
+> cada uno como archivo independiente, a 7×5 in / 300 dpi, con nombre descriptivo
+> (`01_participacion_mturk.pdf`, `02_distribucion_edad.pdf`, ..., `20_rango_ingreso.pdf`).
+> No se genera ningún PDF combinado — cada gráfica vive en su propio archivo, lista para
+> `\includegraphics{.../04_raza_combinaciones.pdf}` en LaTeX.
+
+---
+
+# Resumen de modificaciones respecto a `code1.R` (caso Apple)
+
+| Bloque | Estado | Detalle |
+|--------|--------|---------|
+| 1 — Paquetes | Sin cambios | Mismos paquetes |
+| 2 — Config visual | Sin cambios | Misma paleta y locale |
+| 3 — Funciones | **MOD-02, MOD-05** | `bar_plot()` soporta fuente serif/Times, tamaños configurables, y envuelve títulos/etiquetas largas para que no se recorten; etiqueta de eje Y traducida |
+| 4 — Carga survey | Sin cambios | Mismo archivo |
+| 5 — Race dummies | Sin cambios | Mismos 6 niveles, mismo pipeline |
+| 6 — Life dummies | Sin cambios | Mismos 5 niveles, mismo pipeline |
+| 7 — `survey_enriched` | Sin cambios | Mismo merge con `left_join` |
+| 8 — Gráficos individuales | **MOD-03, MOD-05** | Títulos y etiquetas traducidos al español; `label_wrap` aplicado a raza/educación/frecuencia/cambios de vida |
+| 9 — Export | **MOD-02, MOD-03, MOD-04, MOD-05** | Títulos en español; cada gráfica exportada como PDF individual (sin combinar) a 7x5in/300dpi en `Graficas_Addidas`; `cairo_pdf` para fuentes y acentos; títulos/etiquetas largas envueltas en líneas |

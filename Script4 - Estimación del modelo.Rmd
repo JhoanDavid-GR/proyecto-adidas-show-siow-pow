@@ -1,0 +1,574 @@
+---
+title: "Pipeline de Modelos Estadísticos (POGIT y benchmarks) — Adidas | Script 4: Estimación y comparación de modelos"
+author: "Tesis de Maestría"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = TRUE,
+  warning = FALSE,
+  cache   = FALSE
+)
+```
+
+---
+
+> **Sobre este documento**
+> Script 4: estimación del modelo POGIT (modelo principal) y tres benchmarks
+> estadísticos (Poisson, Binomial Negativa, ZIP), siguiendo el plan de menor riesgo
+> acordado. Referencias:
+>
+> - **POGIT**: Gutiérrez, I., Ramírez, S., & Jofré, L. (2026). Efficient EM Estimation
+>   for the Pogit Model via Polya-Gamma Augmentation. *Entropy*, 28(2), 207.
+>   https://doi.org/10.3390/e28020207 — **verificar con tu directora si esta es la
+>   referencia exacta que ella entregó, o si hay una versión distinta/anterior.**
+> - **Poisson / Binomial Negativa**: Cameron, A. C., & Trivedi, P. K. (2013).
+>   *Regression Analysis of Count Data* (2nd ed.). Cambridge University Press.
+> - **ZIP**: Lambert, D. (1992). Zero-Inflated Poisson Regression, With an Application
+>   to Defects in Manufacturing. *Technometrics*, 34(1), 1–14.
+> - **`hurdle()`/`zeroinfl()` en R**: Zeileis, A., Kleiber, C., & Jackman, S. (2008).
+>   Regression Models for Count Data in R. *Journal of Statistical Software*, 27(8), 1–25.
+>
+> **Pre-requisito:** este script asume que el Script 2 ya corrió completo y que
+> `data/matrices/matrices_data_adidas.xlsx` tiene las 8 hojas (`ids_train`, `ids_test`,
+> `V_train`, `V_test`, `W_train`, `W_test`, `Y_train`, `Y_test`).
+
+---
+
+# Bloque 1 — Carga de paquetes
+
+```{r bloque-1-paquetes}
+packages <- c(
+  "readxl", "dplyr", "tibble", "janitor",
+  "optimParallel", "numDeriv", "parallel",
+  "MASS", "pscl", "AER", "car", "Metrics",
+  "ggplot2", "scales", "sysfonts", "showtext"
+)
+invisible(lapply(packages, require, character.only = TRUE))
+```
+
+> **Output esperado:** Ningún output visible si todos los paquetes están instalados.
+> Si falta alguno (probablemente `AER` o `car`, que no se usaron en los Scripts 1-2),
+> instálalo con `install.packages("AER")` / `install.packages("car")`.
+
+---
+
+# Bloque 1B — Helpers de exportación gráfica (Times New Roman vía `showtext`)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **NUEVO:** este script solo tiene un gráfico (Bloque 3 — distribución de
+> `Y_train`), pero por consistencia visual con el resto del proyecto (Scripts 1, 2 y 3),
+> se le aplica el mismo estándar: fuente Times New Roman exacta vía `showtext`, tema
+> con `base_size = 16`, y exportación individual a PDF tamaño carta.
+
+Igual que en los Scripts 2 y 3, si el archivo de fuente no existe en la ruta esperada,
+el bloque cae de forma segura a `"serif"` y emite una advertencia, en vez de detener
+la ejecución.
+
+> 📌 **Supuesto a confirmar:** no se especificó una carpeta de exportación para este
+> script, así que se usa por defecto `Graficas_Adidas_Estimacion_Modelos`, siguiendo el
+> mismo patrón de nombres que `Graficas_Adidas_Analisis_Descriptivo` (Script 3). Si
+> prefieres otra ruta, dímelo y la ajusto.
+
+```{r bloque-1b-helpers-export-grafico}
+ruta_times_ttf <- "C:/Windows/Fonts/times.ttf"
+FUENTE_EXPORT   <- "Times New Roman"
+
+if (file.exists(ruta_times_ttf)) {
+  sysfonts::font_add(family = FUENTE_EXPORT, regular = ruta_times_ttf)
+  showtext::showtext_auto()
+  showtext::showtext_opts(dpi = 300)
+} else {
+  warning(
+    "No se encontr\u00f3 el archivo de fuente en ", ruta_times_ttf,
+    "; las gr\u00e1ficas exportadas usar\u00e1n 'serif' como respaldo en vez de ",
+    "'Times New Roman' exacta."
+  )
+  FUENTE_EXPORT <- "serif"
+}
+
+# [NUEVO] Carpeta de salida para las gr\u00e1ficas de este script (Estimaci\u00f3n de modelos).
+# Supuesto: nombre an\u00e1logo a la carpeta del Script 3 descriptivo; ajustar si se prefiere otra ruta.
+dir_export_modelos <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/Graficas_Adidas_Estimacion_Modelos"
+if (!dir.exists(dir_export_modelos)) dir.create(dir_export_modelos, recursive = TRUE)
+
+CARTA_W <- 8.5
+CARTA_H <- 11
+
+tamano_fuente <- function(n_elementos) {
+  if (n_elementos > 6) 16 else 17
+}
+
+tema_export_final <- function(base_size = 17) {
+  ggplot2::theme_minimal(base_size = base_size) +
+    ggplot2::theme(
+      text             = ggplot2::element_text(family = FUENTE_EXPORT),
+      panel.grid       = ggplot2::element_blank(),
+      panel.background = ggplot2::element_blank(),
+      plot.background  = ggplot2::element_blank(),
+      axis.line        = ggplot2::element_line(color = "grey60"),
+      axis.ticks       = ggplot2::element_line(color = "grey60"),
+      axis.text        = ggplot2::element_text(color = "grey20"),
+      axis.title       = ggplot2::element_text(color = "grey20"),
+      plot.title       = ggplot2::element_text(color = "grey20", lineheight = 1.05),
+      plot.margin      = ggplot2::margin(t = 18, r = 18, b = 18, l = 18)
+    )
+}
+
+guardar_pdf_carta_gg <- function(plot, nombre_archivo, n_elementos = 1,
+                                 orientacion = c("vertical", "horizontal")) {
+  orientacion <- match.arg(orientacion)
+  bs <- tamano_fuente(n_elementos)
+  
+  plot_final <- plot +
+    tema_export_final(base_size = bs) +
+    ggplot2::theme(plot.margin = ggplot2::margin(t = 20, r = 22, b = 20, l = 20))
+  
+  w <- if (orientacion == "vertical") CARTA_W else CARTA_H
+  h <- if (orientacion == "vertical") CARTA_H else CARTA_W
+  
+  ruta <- file.path(dir_export_modelos, nombre_archivo)
+  ggplot2::ggsave(
+    filename  = ruta,
+    plot      = plot_final,
+    width     = w, height = h, units = "in",
+    dpi       = 300,
+    device    = grDevices::cairo_pdf,
+    limitsize = FALSE
+  )
+  message("Guardado: ", ruta)
+  invisible(ruta)
+}
+
+# Tema para visualizaci\u00f3n EN PANTALLA (serif, base_size=16 \u2014 mismo est\u00e1ndar
+# que tema_descriptivo en el Script 3), distinto del tema de exportaci\u00f3n final.
+tema_descriptivo <- ggplot2::theme_minimal(base_size = 16) +
+  ggplot2::theme(text = ggplot2::element_text(family = "serif"))
+```
+
+> **Output esperado:** Ningún output visible salvo, posiblemente, el `warning` de
+> fuente no encontrada.
+
+---
+
+# Bloque 2 — Carga de matrices y limpieza de nombres de columna
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Lee las 8 hojas del Excel del Script 2. Inmediatamente después, aplica
+`janitor::clean_names()` a V y W (train y test) — esto es importante porque
+`fastDummies::dummy_cols()` (Script 2, Bloque 14) genera nombres de columna como
+`` q_demos_income_$50,000 - $74,999 `` (con espacios, comas y signos de dólar), que
+**no son nombres válidos de R**. Sin limpiarlos, cualquier fórmula que construyamos
+más adelante (`Y ~ .`, o las fórmulas de dos partes de `zeroinfl()`) fallaría o
+requeriría escribir cada nombre entre comillas invertidas. Limpiándolos una sola vez
+aquí, todo el resto del script queda libre de ese problema.
+
+`clean_names()` se aplica **por separado** a train y test, pero como es una función
+determinística del texto del nombre (no de los datos), produce exactamente los mismos
+nombres limpios en ambos — no hay riesgo de que las columnas queden desalineadas entre
+train y test.
+
+```{r bloque-2-carga-excel}
+# [AJUSTADO] Ruta absoluta — mismo criterio que el Script 3 (descriptivo): knitr fija
+# el directorio de trabajo a la carpeta del .Rmd, no a la ra\u00edz del proyecto, lo cual
+# rompe rutas relativas si el archivo no est\u00e1 guardado exactamente en esa carpeta.
+ruta_excel <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/data/matrices/matrices_data_adidas.xlsx"
+
+ids_train <- readxl::read_excel(ruta_excel, sheet = "ids_train")$response_id
+ids_test  <- readxl::read_excel(ruta_excel, sheet = "ids_test")$response_id
+
+V_train <- readxl::read_excel(ruta_excel, sheet = "V_train") |> as.data.frame() |> janitor::clean_names()
+V_test  <- readxl::read_excel(ruta_excel, sheet = "V_test")  |> as.data.frame() |> janitor::clean_names()
+W_train <- readxl::read_excel(ruta_excel, sheet = "W_train") |> as.data.frame() |> janitor::clean_names()
+W_test  <- readxl::read_excel(ruta_excel, sheet = "W_test")  |> as.data.frame() |> janitor::clean_names()
+
+Y_train <- readxl::read_excel(ruta_excel, sheet = "Y_train")[[1]]
+Y_test  <- readxl::read_excel(ruta_excel, sheet = "Y_test")[[1]]
+
+# Verificación de alineación
+stopifnot(length(ids_train) == nrow(V_train), length(ids_train) == nrow(W_train), length(ids_train) == length(Y_train))
+stopifnot(length(ids_test)  == nrow(V_test),  length(ids_test)  == nrow(W_test),  length(ids_test)  == length(Y_test))
+stopifnot(identical(names(V_train), names(V_test)))
+stopifnot(identical(names(W_train), names(W_test)))
+
+message("V_train: ", nrow(V_train), " x ", ncol(V_train), " | W_train: ", nrow(W_train), " x ", ncol(W_train))
+message("Nombres de V (primeros 5): ", paste(head(names(V_train), 5), collapse = ", "))
+```
+
+> **Output esperado:** Confirmación de dimensiones, y que los nombres de V_train y
+> V_test sean idénticos (mismo para W). Si algún `stopifnot()` falla, el Script 2 no
+> terminó de correr correctamente — revisa el Bloque 28 de ese script.
+
+---
+
+# Bloque 3 — Diagnóstico de la distribución de Y (insumo para la Sección 1 de tu documento)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Calcula los estadísticos descriptivos de `Y_train` que necesitas para justificar la
+elección de cada benchmark: % de ceros (para ZIP), y la relación
+media/varianza (para Binomial Negativa).
+
+> ⚠️ **AJUSTADO:** el histograma ahora usa `tema_descriptivo` (serif, tamaño 16,
+> igual que en los Scripts 1-3) en vez de `theme_minimal(base_size = 14)`, y se
+> exporta de forma individual a PDF (tamaño carta, Times New Roman) en
+> `Graficas_Adidas_Estimacion_Modelos`.
+
+```{r bloque-3-diagnostico-y}
+media_y <- mean(Y_train)
+var_y   <- var(Y_train)
+pct_cero <- mean(Y_train == 0) * 100
+
+resumen_y <- tibble::tibble(
+  estadistico = c("Media", "Varianza", "Raz\u00f3n Var/Media", "% de ceros", "M\u00e1ximo"),
+  valor       = c(media_y, var_y, var_y / media_y, pct_cero, max(Y_train))
+)
+print(resumen_y)
+
+p_dist_y <- ggplot2::ggplot(data.frame(Y = Y_train), ggplot2::aes(x = Y)) +
+  ggplot2::geom_histogram(binwidth = 1, fill = "grey75", color = "grey40") +
+  ggplot2::labs(
+    title = "Distribuci\u00f3n de Y_train (gasto Adidas discretizado, T2)",
+    x = "Y", y = "Frecuencia"
+  ) +
+  tema_descriptivo
+print(p_dist_y)
+
+# [NUEVO] Exportación individual a PDF, tamaño carta, Times New Roman
+guardar_pdf_carta_gg(p_dist_y, "03_distribucion_y_train.pdf", n_elementos = 1)
+```
+
+> **Output esperado:** Una tabla con 5 estadísticos y un histograma con pico
+> pronunciado en 0, en pantalla y exportado a `Graficas_Adidas_Estimacion_Modelos`. Si
+> "Razón Var/Media" es mucho mayor a 1, confirma sobredispersión (justifica Binomial
+> Negativa). Si "% de ceros" está cerca de 77%, confirma la necesidad de un modelo de
+> inflación de ceros (justifica ZIP).
+
+---
+
+# Bloque 4 — Preparación de `train_df`/`test_df` para los benchmarks
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **Corrección importante:** `V_train` y `W_train` ya tienen cada una su propia
+> columna `intercept` (agregada en el Bloque 28 del Script 2). Si las combinamos sin
+> quitarla, `glm()` agregaría un *tercer* intercepto automáticamente (vía la fórmula
+> `Y ~ .`), generando columnas perfectamente colineales. Por eso se eliminan ambos
+> `intercept` manuales aquí — los benchmarks usan el intercepto que `glm()`/`zeroinfl()`
+> ya agregan por su cuenta.
+
+```{r bloque-4-prep-train-test}
+V_train_sb <- dplyr::select(V_train, -intercept)
+W_train_sb <- dplyr::select(W_train, -intercept)
+V_test_sb  <- dplyr::select(V_test,  -intercept)
+W_test_sb  <- dplyr::select(W_test,  -intercept)
+
+train_df <- cbind(V_train_sb, W_train_sb)
+train_df$Y <- Y_train
+
+test_df <- cbind(V_test_sb, W_test_sb)
+test_df$Y <- Y_test
+
+stopifnot(identical(names(train_df), names(test_df)))
+message("train_df: ", nrow(train_df), " x ", ncol(train_df), " (incluye columna Y)")
+```
+
+> **Output esperado:** Confirmación de dimensiones. `train_df` y `test_df` deben tener
+> exactamente las mismas columnas (mismo orden, mismos nombres).
+
+---
+
+# Bloque 5 — Modelo Poisson (Benchmark 1)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Ajusta un Poisson de una sola ecuación sobre `Y_train`, usando V+W combinadas como
+predictoras. Es el benchmark más simple: ¿qué tan bien predice un modelo de conteo
+estándar, sin la separación teórica SoW/SioW del POGIT?
+
+```{r bloque-5-modelo-poisson}
+pois_model <- glm(Y ~ ., data = train_df, family = poisson(link = "log"))
+
+cat("AIC Poisson:", AIC(pois_model), "| BIC:", BIC(pois_model), "\n")
+summary(pois_model)$coefficients[1:5, ]  # primeras 5 filas, para no saturar el output
+```
+
+> **Output esperado:** Un modelo ajustado sin errores de rango deficiente. Si ves
+> coeficientes como `NA` en el resumen completo (`summary(pois_model)`), hay
+> colinealidad perfecta residual — revisa el Bloque 4.
+
+---
+
+# Bloque 6 — Diagnósticos post-Poisson: VIF y test de sobredispersión
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+**VIF (Variance Inflation Factor)**: complementa la correlación de Spearman que ya
+calculaste en el Script 2 (Bloque 26). Un VIF mayor a 5-10 para una variable indica
+que su información es altamente redundante con las demás.
+
+**Test de sobredispersión** (`AER::dispersiontest`): a diferencia del chequeo crudo
+`var(Y)/mean(Y)` del Bloque 3 (que mezcla heterogeneidad explicada y no explicada),
+este test evalúa sobredispersión **condicional** — después de controlar por las
+covariables del modelo Poisson ya ajustado. Es la versión rigurosa del mismo
+diagnóstico, y la que deberías citar en la tesis.
+
+```{r bloque-6-diagnosticos-poisson}
+vif_vals <- car::vif(pois_model)
+vif_altos <- sort(vif_vals[vif_vals > 5], decreasing = TRUE)
+
+if (length(vif_altos) > 0) {
+  message("Variables con VIF > 5 (multicolinealidad relevante):")
+  print(vif_altos)
+} else {
+  message("Ninguna variable tiene VIF > 5.")
+}
+
+test_disp <- AER::dispersiontest(pois_model, trafo = 1)
+print(test_disp)
+```
+
+> **Output esperado:** Una lista (posiblemente vacía) de variables con VIF alto, y el
+> resultado del test de dispersión. Si el p-valor del test es < 0.05 y el coeficiente
+> de dispersión estimado es > 1, hay sobredispersión estadísticamente significativa —
+> esa es tu justificación formal para la Binomial Negativa.
+
+---
+
+# Bloque 7 — Modelo Binomial Negativa (Benchmark 2)
+
+```{r bloque-7-modelo-negbin}
+nb_model <- MASS::glm.nb(Y ~ ., data = train_df)
+
+cat("AIC NegBin:", AIC(nb_model), "| BIC:", BIC(nb_model), "\n")
+cat("Par\u00e1metro de dispersi\u00f3n (theta):", nb_model$theta, "\n")
+```
+
+> **Output esperado:** AIC/BIC, idealmente más bajos que los del Poisson (Bloque 5) si
+> efectivamente había sobredispersión — eso confirmaría que la Binomial Negativa es una
+> mejor especificación que el Poisson simple.
+
+---
+
+# Bloque 8 — Modelo ZIP (Benchmark 3)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+> ⚠️ **Corrección importante:** la fórmula de dos partes de `zeroinfl()` separa
+> explícitamente el **componente de conteo** (antes del `|`, usando las variables de
+> **W** — comportamiento/intensidad) del **componente de inflación de ceros** (después
+> del `|`, usando las variables de **V** — demografía/asignación). Esto preserva
+> exactamente los mismos roles teóricos que V y W tienen en el POGIT, en vez de meter
+> todas las variables en ambas ecuaciones.
+
+```{r bloque-8-modelo-zip}
+form_zip <- as.formula(paste(
+  "Y ~", paste(names(W_train_sb), collapse = " + "),
+  "|", paste(names(V_train_sb), collapse = " + ")
+))
+
+zip_model <- pscl::zeroinfl(form_zip, data = train_df, dist = "poisson")
+
+cat("AIC ZIP:", AIC(zip_model), "| BIC:", BIC(zip_model), "\n")
+summary(zip_model)
+```
+
+> **Output esperado:** Dos bloques de coeficientes en el `summary()`: "Count model
+> coefficients" (las variables de W) y "Zero-inflation model coefficients" (las
+> variables de V). Si `zeroinfl()` no converge, prueba agregando `EM = TRUE` a la
+> llamada, o reduce el número de variables candidatas (podrías aplicar el mismo
+> criterio de Spearman/NZV del Script 2 a W antes de esto).
+
+---
+
+# Bloque 9 — Log-verosimilitud del modelo POGIT
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Implementa la verosimilitud marginal $(y_i \mid \theta_i,\lambda_i) \sim
+\text{Poisson}(E_i\,\theta_i\,\lambda_i)$ de Gutiérrez, Ramírez y Jofré (2026), con
+$\theta_i = \text{sigmoid}(V_i\beta_1)$ y $\lambda_i = \exp(W_i\beta_2)$. A diferencia
+de los benchmarks, el POGIT **sí** necesita la columna `intercept` manual de V y W
+(porque la verosimilitud no la agrega por su cuenta), así que aquí usamos `V_train`/
+`W_train` completas, no las versiones `_sb` del Bloque 4.
+
+```{r bloque-9-loglik-pogit}
+neg_loglik_pogit <- function(par, V, W, Y, E = 1) {
+  kV <- ncol(V); kW <- ncol(W)
+  beta1 <- par[1:kV]
+  beta2 <- par[(kV + 1):(kV + kW)]
+
+  eta1 <- as.vector(V %*% beta1)
+  eta2 <- as.vector(W %*% beta2)
+
+  theta  <- plogis(eta1)
+  lambda <- exp(eta2)
+
+  mu <- E * theta * lambda
+  mu <- pmax(mu, 1e-10)
+
+  ll <- sum(Y * log(mu) - mu)
+  -ll
+}
+
+message("Funci\u00f3n neg_loglik_pogit() definida.")
+```
+
+---
+
+# Bloque 10 — Estimación POGIT por máxima verosimilitud (TRAIN)
+
+```{r bloque-10-estimacion-pogit}
+V_train_mat <- as.matrix(V_train)
+W_train_mat <- as.matrix(W_train)
+
+n_par_V <- ncol(V_train_mat)
+n_par_W <- ncol(W_train_mat)
+par_init <- rep(0, n_par_V + n_par_W)
+
+cl <- parallel::makeCluster(max(1, parallel::detectCores() - 1))
+
+fit_pogit <- optimParallel::optimParallel(
+  par      = par_init,
+  fn       = neg_loglik_pogit,
+  V = V_train_mat, W = W_train_mat, Y = Y_train,
+  method   = "BFGS",
+  parallel = list(cl = cl, forward = FALSE, loginfo = TRUE)
+)
+
+parallel::stopCluster(cl)
+
+beta1_hat <- fit_pogit$par[1:n_par_V]
+beta2_hat <- fit_pogit$par[(n_par_V + 1):(n_par_V + n_par_W)]
+names(beta1_hat) <- colnames(V_train_mat)
+names(beta2_hat) <- colnames(W_train_mat)
+
+message("Convergencia (0 = exitosa): ", fit_pogit$convergence)
+message("Log-verosimilitud en el \u00f3ptimo: ", round(-fit_pogit$value, 2))
+```
+
+> **Output esperado:** `convergence = 0`. Si no converge, prueba `method = "L-BFGS-B"`
+> o revisa colinealidad en V con `car::vif()` análogo al Bloque 6.
+
+---
+
+# Bloque 11 — Errores estándar del POGIT (Hessiano)
+
+```{r bloque-11-errores-estandar-pogit}
+hess <- numDeriv::hessian(
+  func = neg_loglik_pogit, x = fit_pogit$par,
+  V = V_train_mat, W = W_train_mat, Y = Y_train
+)
+
+vcov_mat <- solve(hess)
+se_all   <- sqrt(diag(vcov_mat))
+se_beta1 <- se_all[1:n_par_V]
+se_beta2 <- se_all[(n_par_V + 1):(n_par_V + n_par_W)]
+
+tabla_beta1 <- tibble::tibble(
+  variable = names(beta1_hat), beta = beta1_hat, se = se_beta1,
+  z = beta / se, p_valor = 2 * (1 - pnorm(abs(z)))
+)
+tabla_beta2 <- tibble::tibble(
+  variable = names(beta2_hat), beta = beta2_hat, se = se_beta2,
+  z = beta / se, p_valor = 2 * (1 - pnorm(abs(z)))
+)
+
+cat("=== Coeficientes theta (V) ===\n"); print(tabla_beta1)
+cat("\n=== Coeficientes lambda (W) ===\n"); print(tabla_beta2)
+```
+
+> **Output esperado:** Dos tablas con coeficiente, error estándar, z y p-valor.
+
+---
+
+# Bloque 12 — Predicciones de los 4 modelos en TEST y tabla comparativa
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Genera predicciones en TEST para los cuatro modelos y construye la tabla comparativa
+final (MAE, RMSE, correlación de Spearman, AIC, BIC). Para el POGIT, AIC/BIC se
+calculan a mano porque no es un objeto `glm`/`zeroinfl` con método `AIC()` nativo.
+
+```{r bloque-12-comparacion}
+pred_pois <- predict(pois_model, newdata = test_df, type = "response")
+pred_nb   <- predict(nb_model,   newdata = test_df, type = "response")
+pred_zip  <- predict(zip_model,  newdata = test_df, type = "response")
+
+V_test_mat <- as.matrix(V_test)
+W_test_mat <- as.matrix(W_test)
+theta_hat_test  <- plogis(as.vector(V_test_mat %*% beta1_hat))
+lambda_hat_test <- exp(as.vector(W_test_mat %*% beta2_hat))
+pred_pogit <- theta_hat_test * lambda_hat_test  # E_i = 1
+
+# AIC/BIC manuales para POGIT
+k_pogit    <- length(fit_pogit$par)
+n_train    <- length(Y_train)
+loglik_pogit <- -fit_pogit$value
+aic_pogit  <- 2 * k_pogit - 2 * loglik_pogit
+bic_pogit  <- k_pogit * log(n_train) - 2 * loglik_pogit
+
+tabla_comparativa <- tibble::tibble(
+  modelo   = c("Poisson", "NegBin", "ZIP", "POGIT"),
+  MAE      = c(Metrics::mae(Y_test, pred_pois), Metrics::mae(Y_test, pred_nb),
+               Metrics::mae(Y_test, pred_zip),  Metrics::mae(Y_test, pred_pogit)),
+  RMSE     = c(Metrics::rmse(Y_test, pred_pois), Metrics::rmse(Y_test, pred_nb),
+               Metrics::rmse(Y_test, pred_zip),  Metrics::rmse(Y_test, pred_pogit)),
+  Spearman = c(cor(Y_test, pred_pois, method = "spearman"),
+               cor(Y_test, pred_nb,   method = "spearman"),
+               cor(Y_test, pred_zip,  method = "spearman"),
+               cor(Y_test, pred_pogit, method = "spearman")),
+  AIC      = c(AIC(pois_model), AIC(nb_model), AIC(zip_model), aic_pogit),
+  BIC      = c(BIC(pois_model), BIC(nb_model), BIC(zip_model), bic_pogit)
+)
+
+print(tabla_comparativa)
+```
+
+> **Output esperado:** La tabla final con las 4 filas (Poisson, NegBin, ZIP, POGIT) y
+> las 5 métricas. Esta tabla es directamente la "Sección 3 — Resultados" de tu
+> documento.
+
+---
+
+# Bloque 13 — POGIT: SoW/SioW predicho vs. empírico (validación final)
+
+## ¿Qué hace este bloque y por qué es necesario?
+
+Compara $\hat\theta_i$ (SoW predicho) contra el SoW empírico exportado en el Script 2
+(`empirical_sow_adidas.xlsx`) — el benchmark real de negocio, no solo la métrica de
+ajuste de conteos del Bloque 12.
+
+```{r bloque-13-pogit-vs-empirico}
+# [AJUSTADO] Ruta absoluta — mismo criterio que el Bloque 2 y que el Script 3 (descriptivo)
+ruta_sow_empirico <- "C:/Users/User/Documents/Maestria Ciencia de Datos - PUJ Cali/Proyecto_Maestria_SOW_Addidas/cod_grupo2 2/cod_grupo2/data/matrices/empirical_sow_adidas.xlsx"
+sow_emp <- readxl::read_excel(ruta_sow_empirico, sheet = "sow")[[1]]
+ids_sow <- readxl::read_excel(ruta_sow_empirico, sheet = "id")[[1]]
+
+idx_match <- match(ids_test, ids_sow)
+stopifnot(!any(is.na(idx_match)))
+sow_emp_alineado <- sow_emp[idx_match]
+
+mae_theta <- Metrics::mae(sow_emp_alineado, theta_hat_test)
+cor_theta <- cor(sow_emp_alineado, theta_hat_test, method = "spearman")
+
+message("MAE (theta_hat vs SoW emp\u00edrico, TEST): ", round(mae_theta, 4))
+message("Correlaci\u00f3n de Spearman (theta_hat vs SoW emp\u00edrico): ", round(cor_theta, 4))
+```
+
+> **Output esperado:** Un MAE entre 0 y 1, y una correlación de Spearman — idealmente
+> alta y positiva, indicando que el modelo ordena correctamente a los clientes de
+> mayor a menor SoW real, aunque el valor exacto tenga error.
