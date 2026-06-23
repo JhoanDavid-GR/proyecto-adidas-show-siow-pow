@@ -1,6 +1,6 @@
 # Proyecto Adidas - Share of Wallet
 
-Autor: Jhoan David Fernando Gutierrez Rubiano, Juan Garcia, Sergio Aguilar
+Autor: Jhoan Gutierrez Rubiano, Juan Garcia, Sergio Aguilar
 
 Maestría en Ciencias de Datos
 
