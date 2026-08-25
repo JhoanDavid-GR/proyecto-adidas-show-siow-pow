@@ -1,0 +1,115 @@
+base,variable,n,n_na,pct_na
+V_raw_train,response_id,539,0,0
+V_raw_train,raza_negra_afroamericana,539,0,0
+V_raw_train,raza_blanca_caucasica,539,0,0
+V_raw_train,raza_asiatica,539,0,0
+V_raw_train,raza_otra,539,0,0
+V_raw_train,raza_indigena_americana_nativa_alaska,539,0,0
+V_raw_train,raza_nativa_hawaiana_pacifico,539,0,0
+V_raw_train,cambio_perdida_empleo,539,0,0
+V_raw_train,cambio_mudanza,539,0,0
+V_raw_train,cambio_divorcio,539,0,0
+V_raw_train,cambio_tuvo_hijo,539,0,0
+V_raw_train,cambio_embarazo,539,0,0
+V_raw_train,grupo_edad_25 - 34 años,539,0,0
+V_raw_train,grupo_edad_35 - 44 años,539,0,0
+V_raw_train,grupo_edad_45 - 54 años,539,0,0
+V_raw_train,grupo_edad_55 - 64 años,539,0,0
+V_raw_train,grupo_edad_65 años o más,539,0,0
+V_raw_train,"rango_ingresos_$50,000 - $74,999",539,0,0
+V_raw_train,"rango_ingresos_$75,000 - $99,999",539,0,0
+V_raw_train,"rango_ingresos_$100,000 - $149,999",539,0,0
+V_raw_train,"rango_ingresos_$150,000 o más",539,0,0
+V_raw_train,"rango_ingresos_Menos de $25,000",539,0,0
+V_raw_train,rango_ingresos_Prefiero no decir,539,0,0
+V_raw_train,personas_comparten_cuenta_2,539,0,0
+V_raw_train,personas_comparten_cuenta_3,539,0,0
+V_raw_train,personas_comparten_cuenta_4+,539,0,0
+V_raw_train,n_states,539,0,0
+V_raw_test,response_id,135,0,0
+V_raw_test,raza_negra_afroamericana,135,0,0
+V_raw_test,raza_blanca_caucasica,135,0,0
+V_raw_test,raza_asiatica,135,0,0
+V_raw_test,raza_otra,135,0,0
+V_raw_test,raza_indigena_americana_nativa_alaska,135,0,0
+V_raw_test,raza_nativa_hawaiana_pacifico,135,0,0
+V_raw_test,cambio_perdida_empleo,135,0,0
+V_raw_test,cambio_mudanza,135,0,0
+V_raw_test,cambio_divorcio,135,0,0
+V_raw_test,cambio_tuvo_hijo,135,0,0
+V_raw_test,cambio_embarazo,135,0,0
+V_raw_test,grupo_edad_25 - 34 años,135,0,0
+V_raw_test,grupo_edad_35 - 44 años,135,0,0
+V_raw_test,grupo_edad_45 - 54 años,135,0,0
+V_raw_test,grupo_edad_55 - 64 años,135,0,0
+V_raw_test,grupo_edad_65 años o más,135,0,0
+V_raw_test,"rango_ingresos_$50,000 - $74,999",135,0,0
+V_raw_test,"rango_ingresos_$75,000 - $99,999",135,0,0
+V_raw_test,"rango_ingresos_$100,000 - $149,999",135,0,0
+V_raw_test,"rango_ingresos_$150,000 o más",135,0,0
+V_raw_test,"rango_ingresos_Menos de $25,000",135,0,0
+V_raw_test,rango_ingresos_Prefiero no decir,135,0,0
+V_raw_test,personas_comparten_cuenta_2,135,0,0
+V_raw_test,personas_comparten_cuenta_3,135,0,0
+V_raw_test,personas_comparten_cuenta_4+,135,0,0
+V_raw_test,n_states,135,0,0
+W_raw_train,response_id,539,0,0
+W_raw_train,recency_days_2018_Adidas,539,0,0
+W_raw_train,frequency_2018_Adidas,539,0,0
+W_raw_train,monetary_2018_Adidas,539,0,0
+W_raw_train,dollar_avg_12m,539,0,0
+W_raw_train,products_avg_12m,539,0,0
+W_raw_train,dollar_std_12m,539,0,0
+W_raw_train,products_std_12m,539,0,0
+W_raw_train,dollar_top1_12m,539,0,0
+W_raw_train,dollar_top3_avg_12m,539,0,0
+W_raw_train,dollar_top6_avg_12m,539,0,0
+W_raw_train,products_top1_12m,539,0,0
+W_raw_train,products_top3_avg_12m,539,0,0
+W_raw_train,products_top6_avg_12m,539,0,0
+W_raw_train,dollar_spring_avg_12m,539,0,0
+W_raw_train,dollar_summer_avg_12m,539,0,0
+W_raw_train,dollar_autumn_avg_12m,539,0,0
+W_raw_train,dollar_winter_avg_12m,539,0,0
+W_raw_train,products_spring_avg_12m,539,0,0
+W_raw_train,products_summer_avg_12m,539,0,0
+W_raw_train,products_autumn_avg_12m,539,0,0
+W_raw_train,products_winter_avg_12m,539,0,0
+W_raw_train,months_with_purchase_12m,539,0,0
+W_raw_train,dollar_avg12_top1_ratio,539,0,0
+W_raw_train,dollar_avg12_top3_ratio,539,0,0
+W_raw_train,dollar_avg12_top6_ratio,539,0,0
+W_raw_train,products_avg12_top1_ratio,539,0,0
+W_raw_train,products_avg12_top3_ratio,539,0,0
+W_raw_train,products_avg12_top6_ratio,539,0,0
+W_raw_test,response_id,135,0,0
+W_raw_test,recency_days_2018_Adidas,135,0,0
+W_raw_test,frequency_2018_Adidas,135,0,0
+W_raw_test,monetary_2018_Adidas,135,0,0
+W_raw_test,dollar_avg_12m,135,0,0
+W_raw_test,products_avg_12m,135,0,0
+W_raw_test,dollar_std_12m,135,0,0
+W_raw_test,products_std_12m,135,0,0
+W_raw_test,dollar_top1_12m,135,0,0
+W_raw_test,dollar_top3_avg_12m,135,0,0
+W_raw_test,dollar_top6_avg_12m,135,0,0
+W_raw_test,products_top1_12m,135,0,0
+W_raw_test,products_top3_avg_12m,135,0,0
+W_raw_test,products_top6_avg_12m,135,0,0
+W_raw_test,dollar_spring_avg_12m,135,0,0
+W_raw_test,dollar_summer_avg_12m,135,0,0
+W_raw_test,dollar_autumn_avg_12m,135,0,0
+W_raw_test,dollar_winter_avg_12m,135,0,0
+W_raw_test,products_spring_avg_12m,135,0,0
+W_raw_test,products_summer_avg_12m,135,0,0
+W_raw_test,products_autumn_avg_12m,135,0,0
+W_raw_test,products_winter_avg_12m,135,0,0
+W_raw_test,months_with_purchase_12m,135,0,0
+W_raw_test,dollar_avg12_top1_ratio,135,0,0
+W_raw_test,dollar_avg12_top3_ratio,135,0,0
+W_raw_test,dollar_avg12_top6_ratio,135,0,0
+W_raw_test,products_avg12_top1_ratio,135,0,0
+W_raw_test,products_avg12_top3_ratio,135,0,0
+W_raw_test,products_avg12_top6_ratio,135,0,0
+Y_amount_train,amount_2023_Adidas,539,0,0
+Y_amount_test,amount_2023_Adidas,135,0,0
